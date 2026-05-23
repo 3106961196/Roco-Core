@@ -41,12 +41,12 @@ export class RocoMerchant extends plugin {
       priority: 5000,
       rule: [
         {
-          reg: '^#远行商人$|^#商人$|^#远行商$',
+          reg: '^#远行商人$|^#远行商$',
           fnc: 'queryMerchant',
           log: true
         },
         {
-          reg: '^#商人状态$|^#商人检测$',
+          reg: '^#远行商人订阅状态$',
           fnc: 'showStatus',
           log: true
         },
@@ -57,31 +57,25 @@ export class RocoMerchant extends plugin {
           log: true
         },
         {
-          reg: '^#远行商人订阅$|^#商人订阅$',
+          reg: '^#远行商人订阅$',
           fnc: 'subscribeMerchant',
           permission: 'master',
           log: true
         },
         {
-          reg: '^#远行商人取消订阅$|^#取消商人订阅$|^#取消远行商人订阅$',
+          reg: '^#远行商人取消订阅$|^#取消远行商人订阅$',
           fnc: 'unsubscribeMerchant',
           permission: 'master',
           log: true
         },
         {
-          reg: '^#远行商人订阅状态$|^#商人订阅状态$',
-          fnc: 'showSubscriptionStatus',
-          permission: 'master',
-          log: true
-        },
-        {
-          reg: '^#远行商人订阅列表$|^#商人订阅列表$',
+          reg: '^#远行商人订阅列表$',
           fnc: 'listSubscriptions',
           permission: 'master',
           log: true
         },
         {
-          reg: '^#远行商人推送测试$|^#商人推送测试$',
+          reg: '^#远行商人推送测试$',
           fnc: 'testPush',
           permission: 'master',
           log: true
@@ -366,43 +360,57 @@ export class RocoMerchant extends plugin {
       const roundInfo = getRoundInfo()
       const cacheStatus = this.crawler.cache.getStatus()
       const pushStatus = this.pushService.getStatus()
+      const pushConfig = getPushConfig()
 
-      let statusText = `远行商人系统状态\n`
-      statusText += `--------------------\n`
-      statusText += `当前时间：${getBeijingTime().format('YYYY-MM-DD HH:mm:ss')}\n`
-      statusText += `轮次：第 ${roundInfo.current}/${roundInfo.total} 轮\n`
-      statusText += `时段：${roundInfo.timeLabel}\n`
-      statusText += `倒计时：${roundInfo.countdown}\n`
-      statusText += `检测状态：${roundInfo.status === 'active' ? '检测中' : roundInfo.status === 'waiting' ? '等待中' : '未开放'}\n`
+      const isGroup = e.isGroup
+      const type = isGroup ? 'group' : 'private'
+      const id = isGroup ? e.group_id : e.user_id
+      const sub = id ? this.subscriptionManager.getSubscription(type, String(id)) : null
+
+      let msg = '远行商人订阅状态\n'
+      msg += '--------------------\n'
+      msg += `当前时间：${getBeijingTime().format('YYYY-MM-DD HH:mm:ss')}\n`
+      msg += `轮次：第 ${roundInfo.current}/${roundInfo.total} 轮\n`
+      msg += `时段：${roundInfo.timeLabel}\n`
+      msg += `倒计时：${roundInfo.countdown}\n`
+      msg += `检测状态：${roundInfo.status === 'active' ? '检测中' : roundInfo.status === 'waiting' ? '等待中' : '未开放'}\n`
 
       if (cacheStatus.today.exists) {
-        statusText += `\n今日缓存：${cacheStatus.today.valid ? '有效' : '已过期'}\n`
+        msg += `\n今日缓存：${cacheStatus.today.valid ? '有效' : '已过期'}\n`
         if (cacheStatus.today.productCount !== undefined) {
-          statusText += `  商品数：${cacheStatus.today.productCount}件\n`
-          statusText += `  缓存时间：${cacheStatus.today.cachedAt}\n`
-          statusText += `  缓存时长：${cacheStatus.today.age}\n`
+          msg += `  商品数：${cacheStatus.today.productCount}件\n`
+          msg += `  缓存时间：${cacheStatus.today.cachedAt}\n`
+          msg += `  缓存时长：${cacheStatus.today.age}\n`
         }
       } else {
-        statusText += `\n今日缓存：不存在\n`
+        msg += `\n今日缓存：不存在\n`
       }
 
       if (cacheStatus.history.exists) {
-        statusText += `\n历史记录：存在 (${cacheStatus.history.recordCount || 0}条)\n`
-        statusText += `  最后更新：${cacheStatus.history.updatedAt || '--'}\n`
+        msg += `\n历史记录：存在 (${cacheStatus.history.recordCount || 0}条)\n`
+        msg += `  最后更新：${cacheStatus.history.updatedAt || '--'}\n`
       } else {
-        statusText += `\n历史记录：暂无\n`
+        msg += `\n历史记录：暂无\n`
       }
 
-      statusText += `\n渲染器：框架内置 (scale=3)\n`
-      statusText += `\n推送状态：${pushStatus.enabled ? '已启用' : '未启用'}\n`
+      msg += `\n推送功能：${pushConfig.enabled !== false ? '已启用' : '未启用'}\n`
       if (pushStatus.enabled) {
-        statusText += `  订阅数：${pushStatus.subscriptionStats.total} (群${pushStatus.subscriptionStats.groups} 私${pushStatus.subscriptionStats.private})\n`
+        msg += `  订阅数：${pushStatus.subscriptionStats.total} (群${pushStatus.subscriptionStats.groups} 私${pushStatus.subscriptionStats.private})\n`
         if (pushStatus.lastPushedRound !== null) {
-          statusText += `  上次推送：第${pushStatus.lastPushedRound}轮\n`
+          msg += `  上次推送：第${pushStatus.lastPushedRound}轮\n`
         }
       }
 
-      await this.reply(statusText)
+      if (sub) {
+        msg += `\n本${isGroup ? '群' : '你'}订阅：已订阅\n`
+        msg += `  订阅时间：${sub.subscribedAt}\n`
+        msg += `  下一轮推送将在新时段刷新后自动发送`
+      } else {
+        msg += `\n本${isGroup ? '群' : '你'}订阅：未订阅\n`
+        msg += `  发送 #远行商人订阅 即可订阅推送`
+      }
+
+      await this.reply(msg)
       return true
 
     } catch (error) {
@@ -519,43 +527,6 @@ export class RocoMerchant extends plugin {
     } catch (error) {
       logger.error(`[${LOG_TAG}] 取消订阅异常: ${error.message}`)
       await this.reply(`取消订阅失败: ${error.message}`)
-      return false
-    }
-  }
-
-  async showSubscriptionStatus(e) {
-    try {
-      await this.ensureReady()
-
-      const isGroup = e.isGroup
-      const type = isGroup ? 'group' : 'private'
-      const id = isGroup ? e.group_id : e.user_id
-
-      const sub = this.subscriptionManager.getSubscription(type, String(id))
-      const pushConfig = getPushConfig()
-
-      let msg = '远行商人订阅状态\n'
-      msg += '--------------------\n'
-      msg += `推送功能：${pushConfig.enabled !== false ? '已启用' : '未启用'}\n`
-
-      if (sub) {
-        msg += `订阅状态：已订阅\n`
-        msg += `订阅时间：${sub.subscribedAt}\n`
-        msg += `订阅类型：${sub.type === 'group' ? '群聊推送' : '私聊推送'}\n`
-
-        const roundInfo = getRoundInfo()
-        msg += `\n当前时段：第${roundInfo.current}轮 ${roundInfo.timeLabel}\n`
-        msg += `下一轮推送将在新时段刷新后自动发送`
-      } else {
-        msg += `订阅状态：未订阅\n`
-        msg += `\n发送 #远行商人订阅 即可订阅推送`
-      }
-
-      await this.reply(msg)
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 查询订阅状态异常: ${error.message}`)
-      await this.reply(`查询失败: ${error.message}`)
       return false
     }
   }
