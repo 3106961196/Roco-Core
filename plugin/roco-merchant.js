@@ -6,6 +6,7 @@ import { PATHS } from './shared/paths.js'
 import { getUIConfig, getPushConfig } from './shared/config.js'
 import RendererLoader from '../../../src/infrastructure/renderer/loader.js'
 import path from 'path'
+import fs from 'node:fs/promises'
 
 const LOG_TAG = '洛克王国-远行商人'
 
@@ -286,6 +287,13 @@ export class RocoMerchant extends plugin {
       }
       const img = await renderer.render('远行商人', renderData)
       if (!img) return false
+      
+      // 渲染完成后删除临时 HTML 文件，避免被框架定时清理误删
+      if (renderData.saveId) {
+        const htmlPath = `./trash/html/远行商人/${renderData.saveId}.html`
+        fs.unlink(htmlPath).catch(() => {})
+      }
+      
       return segment.image(img)
     } catch (error) {
       logger.error(`[${LOG_TAG}] 渲染图片失败: ${error.message}`)

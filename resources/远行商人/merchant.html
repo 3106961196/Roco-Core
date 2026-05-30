@@ -451,6 +451,7 @@ html, body {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  line-clamp: 2;
 }
 .product-empty {
   grid-column: 1 / -1;
@@ -549,7 +550,7 @@ html, body {
       {{ if otherPeriods.length > 0 }}
       <div class="history-section">
         <div class="history-title">
-          <div class="history-title-main"><i class="ri-history-line"></i> {{ if isClosed }}昨日{{ else if currentRound === 1 }}昨日及今日{{ else }}今日{{ /if }}已过时商品</div>
+          <div class="history-title-main"><i class="ri-history-line"></i> {{ if isClosed || currentRound === 1 }}昨日{{ else }}今日{{ /if }}已过时商品</div>
         </div>
         <div class="history-groups">
           {{ each otherPeriods }}
