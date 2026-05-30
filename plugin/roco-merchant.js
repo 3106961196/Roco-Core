@@ -10,6 +10,9 @@ import fs from 'node:fs/promises'
 
 const LOG_TAG = '洛克王国-远行商人'
 
+// 模块级单例锁，防止插件被多次实例化导致重复执行
+let _singletonInstance = null
+
 // 模板目录: core/Roco-Core/resources/远行商人/
 const TPL_DIR = path.join(PATHS.BASE_DIR, 'resources', '远行商人')
 const TPL_FILE = path.join(TPL_DIR, 'merchant.html')
@@ -42,41 +45,42 @@ export class RocoMerchant extends plugin {
       priority: 5000,
       rule: [
         {
-          reg: '^#远行商人$|^#远行商$',
+          reg: '^#?远行商人$',
           fnc: 'queryMerchant',
           log: true
         },
         {
-          reg: '^#远行商人订阅状态$',
-          fnc: 'showStatus',
-          log: true
-        },
-        {
-          reg: '^#刷新商人$|^#强制刷新.*商人',
-          fnc: 'forceRefresh',
-          permission: 'master',
-          log: true
-        },
-        {
-          reg: '^#远行商人订阅$',
+          reg: '^#?远行商人订阅$',
           fnc: 'subscribeMerchant',
           permission: 'master',
           log: true
         },
         {
-          reg: '^#远行商人取消订阅$|^#取消远行商人订阅$',
+          reg: '^#强制刷新远行人$',
+          fnc: 'forceRefresh',
+          permission: 'master',
+          log: true
+        },
+        {
+          reg: '^#?远行商人状态$',
+          fnc: 'showStatus',
+          permission: 'master',
+          log: true
+        },
+        {
+          reg: '^#?远行商人取消订阅$',
           fnc: 'unsubscribeMerchant',
           permission: 'master',
           log: true
         },
         {
-          reg: '^#远行商人订阅列表$',
+          reg: '^#?远行商人订阅列表$',
           fnc: 'listSubscriptions',
           permission: 'master',
           log: true
         },
         {
-          reg: '^#远行商人推送测试$',
+          reg: '^#?远行商人推送测试$',
           fnc: 'testPush',
           permission: 'master',
           log: true
@@ -92,6 +96,17 @@ export class RocoMerchant extends plugin {
   }
 
   async _doInit() {
+    // 单例保护：如果已有一个实例在运行，共享其组件引用
+    if (_singletonInstance && _singletonInstance._initialized) {
+      logger.debug(`[${LOG_TAG}] 插件已初始化，共享单例组件`)
+      this.crawler = _singletonInstance.crawler
+      this.subscriptionManager = _singletonInstance.subscriptionManager
+      this.pushService = _singletonInstance.pushService
+      this._initialized = true
+      return
+    }
+    _singletonInstance = this
+
     this.crawler = new MerchantCrawler()
     this.subscriptionManager = new SubscriptionManager()
     this.pushService = new PushService(this.subscriptionManager)
@@ -105,6 +120,9 @@ export class RocoMerchant extends plugin {
 
     await this.crawler.init()
     this.startInternalScheduler()
+    
+    // 标记初始化完成
+    this._initialized = true
   }
 
   async init() {

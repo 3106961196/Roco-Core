@@ -66,18 +66,18 @@ class PushService {
    * 执行推送 - 向所有订阅者发送新时段通知
    * 图片和文字分条发送，确保图片可靠送达
    *
-   * @param {object} merchantImage - 渲染好的图片消息 (segment.image)
+   * @param {object} merchantImage - 渲染好的图片消息 (segment.image 或 Buffer/路径)
    * @param {object} data - 商人数据
-   * @returns {Promise<{total: number, success: number, failed: number}>}
+   * @returns {Promise<{total: number, success: number, failed: number, details: Array}>}
    */
   async pushToAll(merchantImage, data) {
     if (this._pushing) {
       logger.debug(`[${LOG_TAG}] 推送进行中，跳过`)
-      return { total: 0, success: 0, failed: 0 }
+      return { total: 0, success: 0, failed: 0, details: [] }
     }
 
     if (!this.shouldPush(data)) {
-      return { total: 0, success: 0, failed: 0 }
+      return { total: 0, success: 0, failed: 0, details: [] }
     }
 
     this._pushing = true
@@ -88,7 +88,7 @@ class PushService {
     const subscriptions = this.subscriptionManager.getAll()
     if (subscriptions.length === 0) {
       this._pushing = false
-      return { total: 0, success: 0, failed: 0 }
+      return { total: 0, success: 0, failed: 0, details: [] }
     }
 
     const roundInfo = data?.roundInfo
@@ -100,28 +100,43 @@ class PushService {
 
     let success = 0
     let failed = 0
+    const details = []
 
     for (const sub of subscriptions) {
       let sent = false
+      let lastError = null
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          // 只发送图片，不发送文字
-          if (merchantImage) {
-            await this._sendToTarget(sub, merchantImage)
+          // 构造标准消息格式
+          const msg = this._buildMessage(merchantImage, sub)
+          if (!msg) throw new Error('消息构造失败')
+
+          const result = await this._sendToTarget(sub, msg)
+
+          // 验证发送结果（XRK-AGT框架sendMsg应返回非空值）
+          if (result === undefined || result === false) {
+            throw new Error('sendMsg返回空值，可能发送失败')
           }
+
           sent = true
           success++
+          details.push({ type: sub.type, id: sub.id, success: true })
           break
         } catch (error) {
+          lastError = error
           if (attempt < maxRetries) {
             logger.debug(`[${LOG_TAG}] 推送失败 ${sub.type}(${sub.id}) 第${attempt}次，${retryDelay / 1000}秒后重试: ${error.message}`)
             await this._sleep(retryDelay)
           } else {
             logger.error(`[${LOG_TAG}] 推送失败 ${sub.type}(${sub.id})，已重试${maxRetries}次: ${error.message}`)
+            details.push({ type: sub.type, id: sub.id, success: false, error: error.message })
           }
         }
       }
       if (!sent) failed++
+
+      // 每次推送后短暂间隔，避免QQ风控限流
+      await this._sleep(500)
     }
 
     // 更新推送状态
@@ -132,26 +147,59 @@ class PushService {
 
     logger.mark(`[${LOG_TAG}] 推送完成: 成功 ${success}，失败 ${failed}`)
 
-    return { total: subscriptions.length, success, failed }
+    return { total: subscriptions.length, success, failed, details }
+  }
+
+  /**
+   * 构造消息对象
+   * 支持多种输入格式：segment.image对象、Buffer、文件路径
+   */
+  _buildMessage(merchantImage, sub) {
+    if (!merchantImage) return null
+
+    // 如果已经是标准的segment.image对象，直接返回
+    if (typeof merchantImage === 'object' && merchantImage.type === 'image') {
+      return [merchantImage]
+    }
+
+    // 如果是Buffer或字符串路径，构造image segment
+    if (Buffer.isBuffer(merchantImage)) {
+      return [{ type: 'image', data: { file: 'base64://' + merchantImage.toString('base64') } }]
+    }
+
+    if (typeof merchantImage === 'string') {
+      return [{ type: 'image', data: { file: merchantImage } }]
+    }
+
+    // 其他情况尝试直接使用
+    return [merchantImage]
   }
 
   /**
    * 向单个目标发送消息
-   * 使用 Bot.pickGroup/pickFriend 的 sendMsg 方法，与 reply 走相同链路
+   * 使用 bot.sendMsg 便捷方法（支持 { user_id } 或 { group_id } 参数）
+   * @returns {Promise<any>} 发送结果
    */
   async _sendToTarget(subscription, msg) {
-    if (typeof Bot === 'undefined' || !Bot.uin || Bot.uin.length === 0) {
-      throw new Error('Bot 未就绪')
+    let bot = null
+    for (const id of Bot.uin) {
+      if (id === 'stdin') continue
+      const b = Bot[id]
+      if (b && typeof b.sendMsg === 'function') {
+        bot = b
+        break
+      }
     }
+    if (!bot) throw new Error('找不到可用的 Bot 实例')
 
     if (subscription.type === 'group') {
-      const group = Bot.pickGroup(String(subscription.id))
-      if (!group) throw new Error(`群 ${subscription.id} 不存在`)
-      await group.sendMsg(msg)
+      const result = await bot.sendMsg({ group_id: String(subscription.id) }, msg)
+      if (!result) throw new Error(`群 ${subscription.id} 发送失败`)
+      return result
     } else if (subscription.type === 'private') {
-      const friend = Bot.pickFriend(String(subscription.id))
-      if (!friend) throw new Error(`好友 ${subscription.id} 不存在`)
-      await friend.sendMsg(msg)
+      const result = await bot.sendMsg({ user_id: String(subscription.id) }, msg)
+      if (!result) throw new Error(`好友 ${subscription.id} 发送失败`)
+      return result
     } else {
       throw new Error(`未知订阅类型: ${subscription.type}`)
     }
