@@ -73,9 +73,19 @@ class MerchantCrawler {
       const allProducts = rawData.products || []
       const roundInfo = getRoundInfo()
       const currentSlot = rawData.timeInfo?.currentSlot || '--'
+      const currentSlotIndex = rawData.timeInfo?.currentIndex || -1
 
-      // 当前可见商品
-      const visibleProducts = allProducts.filter(p => p.isVisible)
+      // 基于时间的智能判定：当前轮次商品 = 属于当前 slot 且尚未过期
+      const currentProducts = allProducts.filter(p => {
+        if (!p.slotIndices || !p.slotIndices.includes(currentSlotIndex)) return false
+        return p.status !== 'ended'
+      })
+
+      // 调试：输出被排除的商品信息
+      if (currentProducts.length === 0 && allProducts.length > 0) {
+        const excluded = allProducts.filter(p => !currentProducts.includes(p))
+        logger.warn(`[${LOG_TAG}] 当前轮次(slot=${currentSlotIndex})无有效商品，共${allProducts.length}个商品被排除: ${excluded.map(p => `${p.name}(slots=${p.slotIndices},status=${p.status})`).join(', ') || '无'}`)
+      }
 
       // 按时段分组构建历史数据
       const historyGroups = buildHistoryGroupsFromSlots(allProducts, rawData.timeInfo)
@@ -84,8 +94,8 @@ class MerchantCrawler {
         success: true,
         date: getBeijingTime().format('YYYY-MM-DD'),
         roundInfo,
-        productCount: visibleProducts.length,
-        products: visibleProducts.map(p => ({
+        productCount: currentProducts.length,
+        products: currentProducts.map(p => ({
           name: p.name,
           icon: p.icon || '',   // 保留icon URL用于图标下载，不写入缓存
           price: p.price,
@@ -168,11 +178,17 @@ class MerchantCrawler {
             const limitText = limitEl?.textContent?.trim() || ''
             const timeText = timeEl?.textContent?.trim() || ''
 
+            // data-time: 商品到期 Unix 时间戳（秒），由服务端渲染到 li 属性上
+            const dataTime = li.getAttribute('data-time')
+            const expireTimestamp = dataTime ? parseInt(dataTime) * 1000 : 0
+
             const isVisible = li.style.display !== 'none'
 
             let status = 'unknown'
             if (timeText === '已结束') status = 'ended'
             else if (timeText.match(/^\d{2}:\d{2}:\d{2}$/)) status = 'active'
+            // 基于 data-time 的精确判定：已过期则为 ended
+            if (expireTimestamp > 0 && Date.now() >= expireTimestamp) status = 'ended'
 
             let price = priceText.replace('价格：', '').replace(' ', '').trim()
             if (price && !price.match(/^\d/)) price = '未知'
@@ -190,6 +206,7 @@ class MerchantCrawler {
                 status,
                 isVisible,
                 timeText,
+                expireTimestamp,
                 slotIndices: [],
               }
 
@@ -237,10 +254,15 @@ class MerchantCrawler {
           allSlots: timeSlots,
         }
 
+        // 提取服务端时间基准（页面用 serverNow 变量驱动倒计时）
+        if (typeof window.serverNow === 'number') {
+          result.timeInfo.serverNow = window.serverNow
+        }
+
         return result
       })
 
-      logger.mark(`[${LOG_TAG}] 提取到 ${data.products.length} 个商品 (DOM元素: ${data.debug?.totalLis || 0})`)
+      logger.mark(`[${LOG_TAG}] 提取到 ${data.products.length} 个商品 (DOM元素: ${data.debug?.totalLis || 0})，当前时段: ${data.timeInfo?.currentIndex || '?'}，服务端时间: ${data.timeInfo?.serverNow || 'N/A'}`)
       if (data.products.length === 0 && data.debug?.totalLis > 0) {
         logger.warn(`[${LOG_TAG}] DOM有${data.debug.totalLis}个商品元素但提取0个，可能选择器不匹配`)
       }
@@ -392,6 +414,8 @@ export default MerchantCrawler
  * 按页面时段信息分组商品
  * 页面上有4个时段(show_1~show_4)，每个商品通过 slotIndices 数组关联到所属时段
  * 一个商品可以属于多个时段（如网兜球在所有时段都有）
+ *
+ * 已结束时段中：排除同时属于当前时段且仍有效的商品，避免重复显示
  */
 function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
   const slots = timeInfo?.allSlots || []
@@ -401,14 +425,16 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
   const groups = []
 
   for (const slot of slots) {
-    const slotProducts = allProducts.filter(p => {
-      // 商品通过 slotIndices 数组关联到时段
-      return p.slotIndices && p.slotIndices.includes(slot.index)
-    })
-
     const isCurrentSlot = slot.index === currentSlotIndex
     const isEnded = slot.index < currentSlotIndex
     const isUpcoming = slot.index > currentSlotIndex
+
+    const slotProducts = allProducts.filter(p => {
+      if (!p.slotIndices || !p.slotIndices.includes(slot.index)) return false
+      // 已结束时段：排除同时属于当前时段且仍有效的商品（避免重复）
+      if (isEnded && p.slotIndices.includes(currentSlotIndex) && p.status !== 'ended') return false
+      return true
+    })
 
     if (slotProducts.length === 0 && !isCurrentSlot) continue
 
@@ -420,6 +446,7 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
         icon: p.icon || '',
         price: p.price,
         buyLimit: p.buyLimit,
+        status: p.status,
       })),
     })
   }

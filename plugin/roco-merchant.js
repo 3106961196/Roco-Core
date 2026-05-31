@@ -111,16 +111,28 @@ export class RocoMerchant extends plugin {
     this.subscriptionManager = new SubscriptionManager()
     this.pushService = new PushService(this.subscriptionManager)
     this.lastDetectionTime = null
-    this.currentRoundIndex = -1
-    this.roundDataFetched = false
     this.internalTimer = null
+
+    // 启动时同步当前轮次号，但不触发推送
+    // 只有后续调度中发现轮次变化才是真正的"新轮次到点"
+    const bootRoundInfo = getRoundInfo()
+    this.currentRoundIndex = bootRoundInfo.current
+    this.roundDataFetched = false
+
+    // 框架重启后：将推送状态同步到当前轮次，防止重启后误推
+    // 这样 shouldPush 的 lastPushedRound/lastPushedDate 会匹配当前轮次，不会重复推送
+    if (bootRoundInfo.current > 0) {
+      this.pushService.lastPushedRound = bootRoundInfo.current
+      this.pushService.lastPushedDate = getBeijingTime().format('YYYY-MM-DD')
+      logger.debug(`[${LOG_TAG}] 重启同步: 第${bootRoundInfo.current}轮，禁止重启推送`)
+    }
 
     // 绑定检测成功回调，触发推送
     this.crawler.onDetectionSuccess = (data) => this.onDetectionSuccess(data)
 
     await this.crawler.init()
     this.startInternalScheduler()
-    
+
     // 标记初始化完成
     this._initialized = true
   }
@@ -176,6 +188,7 @@ export class RocoMerchant extends plugin {
     })
 
     // 历史商品: 从今日爬取数据中的已结束时段获取
+    // 已结束时段中，排除同时出现在当前轮次且仍有效的商品（由 buildHistoryGroupsFromSlots 去重）
     const todayEnded = (data.historyGroups || [])
       .filter(g => g.statusLabel === '已结束')
       .map(g => ({
@@ -186,6 +199,8 @@ export class RocoMerchant extends plugin {
           iconUrl: getIconUrl(this.crawler.iconManager, p.name),
         })),
       }))
+      // 过滤掉商品全部被去重后为空的时段
+      .filter(g => g.products.length > 0)
 
     // 第1轮需要额外显示昨日的全部已过期商品
     let yesterdayEnded = []
