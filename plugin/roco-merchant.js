@@ -169,7 +169,9 @@ export class RocoMerchant extends plugin {
   prepareRenderData(data) {
     const resPrefix = toFileUrl(TPL_DIR) + '/'
     const uiConfig = getUIConfig()
-    const currentRound = data.roundInfo?.current || 1
+    // 时间相关字段实时计算，避免使用缓存中冻结的倒计时
+    const liveRoundInfo = getRoundInfo()
+    const currentRound = liveRoundInfo.current || 1
 
     // 当前轮次商品
     const currentProducts = (data.products || []).map(p => {
@@ -221,8 +223,8 @@ export class RocoMerchant extends plugin {
 
       date: data.date || getBeijingTime().format('YYYY-MM-DD'),
       currentRound,
-      totalRounds: data.roundInfo?.total || 4,
-      remainingTime: data.roundInfo?.countdown || '--',
+      totalRounds: liveRoundInfo.total || 4,
+      remainingTime: liveRoundInfo.countdown || '--',
       nextRoundTime: '',
       isClosed: false,
 
@@ -238,6 +240,8 @@ export class RocoMerchant extends plugin {
   prepareClosedData(roundInfo) {
     const resPrefix = toFileUrl(TPL_DIR) + '/'
     const uiConfig = getUIConfig()
+    // 实时计算倒计时，避免使用冻结的缓存数据
+    const liveRoundInfo = getRoundInfo()
 
     const otherPeriods = this._loadYesterdayHistory()
 
@@ -251,9 +255,9 @@ export class RocoMerchant extends plugin {
 
       date: getBeijingTime().format('YYYY-MM-DD'),
       currentRound: 0,
-      totalRounds: roundInfo.total,
+      totalRounds: liveRoundInfo.total,
       remainingTime: '',
-      nextRoundTime: roundInfo.countdown,
+      nextRoundTime: liveRoundInfo.countdown,
       isClosed: true,
 
       currentProducts: [],
