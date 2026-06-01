@@ -431,8 +431,6 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
 
     const slotProducts = allProducts.filter(p => {
       if (!p.slotIndices || !p.slotIndices.includes(slot.index)) return false
-      // 已结束时段：排除同时属于当前时段且仍有效的商品（避免重复）
-      if (isEnded && p.slotIndices.includes(currentSlotIndex) && p.status !== 'ended') return false
       return true
     })
 

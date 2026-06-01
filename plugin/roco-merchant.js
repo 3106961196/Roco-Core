@@ -189,17 +189,22 @@ export class RocoMerchant extends plugin {
       }
     })
 
+    // 当前轮次商品名集合，用于从历史时段中去重
+    const currentProductNames = new Set(currentProducts.map(p => p.name))
+
     // 历史商品: 从今日爬取数据中的已结束时段获取
-    // 已结束时段中，排除同时出现在当前轮次且仍有效的商品（由 buildHistoryGroupsFromSlots 去重）
+    // 已结束时段中，排除同时出现在当前轮次的商品（避免重复显示）
     const todayEnded = (data.historyGroups || [])
       .filter(g => g.statusLabel === '已结束')
       .map(g => ({
         time: g.timeLabel || '--:--',
         status: 'ended',
-        products: (g.products || []).map(p => ({
-          name: p.name,
-          iconUrl: getIconUrl(this.crawler.iconManager, p.name),
-        })),
+        products: (g.products || [])
+          .filter(p => !currentProductNames.has(p.name))
+          .map(p => ({
+            name: p.name,
+            iconUrl: getIconUrl(this.crawler.iconManager, p.name),
+          })),
       }))
       // 过滤掉商品全部被去重后为空的时段
       .filter(g => g.products.length > 0)
