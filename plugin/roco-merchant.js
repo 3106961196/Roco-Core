@@ -329,14 +329,14 @@ export class RocoMerchant extends plugin {
       }
       const img = await renderer.render('远行商人', renderData)
       if (!img) return false
-      
+
       // 渲染完成后删除临时 HTML 文件，避免被框架定时清理误删
       if (renderData.saveId) {
         const htmlPath = `./trash/html/远行商人/${renderData.saveId}.html`
         fs.unlink(htmlPath).catch(() => {})
       }
-      
-      return segment.image(img)
+
+      return img
     } catch (error) {
       logger.error(`[${LOG_TAG}] 渲染图片失败: ${error.message}`)
       return false
@@ -355,7 +355,7 @@ export class RocoMerchant extends plugin {
         const renderData = this.prepareClosedData(roundInfo)
         const result = await this.renderImage(renderData)
         if (result) {
-          await this.reply(result)
+          await this.reply(e.segment.image(result))
         } else {
           await this.reply(`今日已闭市\n下一轮：${roundInfo.countdown}`)
         }
@@ -388,9 +388,8 @@ export class RocoMerchant extends plugin {
       // 渲染图片
       const renderData = this.prepareRenderData(data)
       const result = await this.renderImage(renderData)
-
       if (result) {
-        await this.reply(result)
+        await this.reply(e.segment.image(result))
         return true
       } else {
         await this.reply('图片生成失败，请稍后重试')
@@ -493,7 +492,7 @@ export class RocoMerchant extends plugin {
         const result = await this.renderImage(renderData)
 
         if (result) {
-          await this.reply(result)
+          await this.reply(e.segment.image(result))
           return true
         }
       }
