@@ -52,7 +52,6 @@ export class RocoMerchant extends plugin {
         {
           reg: '^#?远行商人订阅$',
           fnc: 'subscribeMerchant',
-          permission: 'master',
           log: true
         },
         {
