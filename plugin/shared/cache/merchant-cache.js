@@ -1,19 +1,24 @@
 import fs from 'fs'
 import path from 'path'
-import { PATHS } from './paths.js'
-import { getBeijingTime } from './time-utils.js'
-import { getCacheConfig } from './config.js'
+import { PATHS } from '../paths.js'
+import { getBeijingTime } from '../time-utils.js'
+import { getCacheConfig } from '../config.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 
 // 保留最近N天的日期缓存文件
 const MAX_CACHE_DAYS = 2
 
-class CacheManager {
+/**
+ * 今日缓存 - 按日期存储的「远行商人」商品快照
+ *
+ * 文件结构：data/Roco-data/cache/merchant/today_YYYY-MM-DD.json
+ * 数据内容：{ date, roundInfo, productCount, products, historyGroups, fetchedAt, _cachedAt, ... }
+ */
+class MerchantCache {
   constructor(options = {}) {
     const cacheConfig = getCacheConfig()
     this.ttl = options.ttl || cacheConfig.ttl || 1800
-    this.maxHistoryRecords = options.maxHistoryRecords || cacheConfig.maxHistoryRecords || 100
     this.cacheDir = options.cacheDir || PATHS.MERCHANT_CACHE_DIR
 
     this.ensureDirs()
@@ -60,22 +65,22 @@ class CacheManager {
     return path.join(this.cacheDir, `today_${today}.json`)
   }
 
-  get historyCachePath() {
-    return path.join(this.cacheDir, 'history.json')
+  /**
+   * 指定日期的缓存文件路径
+   * @param {string} dateStr - YYYY-MM-DD
+   */
+  cachePathFor(dateStr) {
+    return path.join(this.cacheDir, `today_${dateStr}.json`)
   }
 
   hasValidTodayCache() {
     const cachePath = this.todayCachePath
-
-    if (!fs.existsSync(cachePath)) {
-      return false
-    }
+    if (!fs.existsSync(cachePath)) return false
 
     try {
       const stats = fs.statSync(cachePath)
       const now = Date.now()
       const age = (now - stats.mtimeMs) / 1000
-
       return age < this.ttl
     } catch (error) {
       return false
@@ -93,10 +98,7 @@ class CacheManager {
   getToday() {
     try {
       const cachePath = this.todayCachePath
-
-      if (!fs.existsSync(cachePath)) {
-        return null
-      }
+      if (!fs.existsSync(cachePath)) return null
 
       const raw = fs.readFileSync(cachePath, 'utf-8')
       const data = JSON.parse(raw)
@@ -105,11 +107,7 @@ class CacheManager {
         logger.warn(`[${LOG_TAG}] 今日缓存数据结构异常，已忽略`)
         return null
       }
-
-      if (!this.isValid(data)) {
-        return null
-      }
-
+      if (!this.isValid(data)) return null
       return data
     } catch (error) {
       logger.error(`[${LOG_TAG}] 读取今日缓存失败: ${error.message}`)
@@ -118,24 +116,17 @@ class CacheManager {
   }
 
   /**
-   * 获取昨日缓存数据（闭市时段使用）
+   * 获取昨日缓存数据（闭市时段 / 第1轮显示使用）
    */
   getYesterday() {
     try {
       const yesterday = getBeijingTime().subtract(1, 'day').format('YYYY-MM-DD')
-      const cachePath = path.join(this.cacheDir, `today_${yesterday}.json`)
-
-      if (!fs.existsSync(cachePath)) {
-        return null
-      }
+      const cachePath = this.cachePathFor(yesterday)
+      if (!fs.existsSync(cachePath)) return null
 
       const raw = fs.readFileSync(cachePath, 'utf-8')
       const data = JSON.parse(raw)
-
-      if (!this.validateCacheData(data)) {
-        return null
-      }
-
+      if (!this.validateCacheData(data)) return null
       return data
     } catch (error) {
       logger.error(`[${LOG_TAG}] 读取昨日缓存失败: ${error.message}`)
@@ -146,17 +137,13 @@ class CacheManager {
   setToday(data) {
     try {
       this.ensureDirs()
-
       const cacheData = {
         ...JSON.parse(JSON.stringify(data)),
         _cachedAt: Date.now(),
         _expiresAt: Date.now() + (this.ttl * 1000),
         _type: 'today',
       }
-
-      const cachePath = this.todayCachePath
-      fs.writeFileSync(cachePath, JSON.stringify(cacheData, null, 2), 'utf-8')
-
+      fs.writeFileSync(this.todayCachePath, JSON.stringify(cacheData, null, 2), 'utf-8')
       logger.mark(`[${LOG_TAG}] 缓存 ${data.productCount || 0} 个商品`)
       return true
     } catch (error) {
@@ -165,72 +152,42 @@ class CacheManager {
     }
   }
 
-  getHistory() {
+  /**
+   * 写入指定日期的缓存（用于补抓昨日数据，不修改今日）
+   * @param {string} dateStr - YYYY-MM-DD
+   * @param {object} data - 缓存数据
+   */
+  setForDate(dateStr, data) {
     try {
-      const cachePath = this.historyCachePath
-
-      if (!fs.existsSync(cachePath)) {
-        return null
+      this.ensureDirs()
+      const cacheData = {
+        ...JSON.parse(JSON.stringify(data)),
+        _cachedAt: Date.now(),
+        _expiresAt: Date.now() + (this.ttl * 1000),
+        _type: 'today',
       }
-
-      const raw = fs.readFileSync(cachePath, 'utf-8')
-      const data = JSON.parse(raw)
-
-      if (!data || !Array.isArray(data.records)) {
-        logger.warn(`[${LOG_TAG}] 历史缓存数据结构异常`)
-        return null
-      }
-
-      return data
+      fs.writeFileSync(this.cachePathFor(dateStr), JSON.stringify(cacheData, null, 2), 'utf-8')
+      return true
     } catch (error) {
-      logger.error(`[${LOG_TAG}] 读取历史缓存失败: ${error.message}`)
-      return null
+      logger.error(`[${LOG_TAG}] 写入缓存 ${dateStr} 失败: ${error.message}`)
+      return false
     }
-  }
-
-  appendToHistory(product) {
-    return this.batchAppendToHistory([product])
   }
 
   /**
-   * 批量追加历史记录（单次读-改-写，避免多次 I/O）
+   * 写入昨日缓存（补抓场景使用，保留原 _cachedAt 以免影响 TTL 判定）
    */
-  batchAppendToHistory(products) {
-    if (!products || products.length === 0) return true
-
-    try {
-      this.ensureDirs()
-
-      let history = this.getHistory() || {
-        records: [],
-        updatedAt: null,
-      }
-
-      const now = getBeijingTime().format('YYYY-MM-DD HH:mm:ss')
-      const timestamp = Date.now()
-
-      for (const product of products) {
-        history.records.push({
-          ...product,
-          recordedAt: now,
-          timestamp,
-        })
-      }
-
-      if (history.records.length > this.maxHistoryRecords) {
-        history.records = history.records.slice(-this.maxHistoryRecords)
-      }
-
-      history.updatedAt = now
-
-      const cachePath = this.historyCachePath
-      fs.writeFileSync(cachePath, JSON.stringify(history, null, 2), 'utf-8')
-
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 写入历史缓存失败: ${error.message}`)
-      return false
+  setYesterday(data) {
+    const yesterday = getBeijingTime().subtract(1, 'day').format('YYYY-MM-DD')
+    // 若已有昨日缓存则合并 _cachedAt，避免补抓后立即失效
+    const existing = this.getYesterday()
+    const merged = {
+      ...data,
+      _cachedAt: existing?._cachedAt || Date.now(),
+      _expiresAt: existing?._expiresAt || (Date.now() + this.ttl * 1000),
+      _type: 'today',
     }
+    return this.setForDate(yesterday, merged)
   }
 
   clearToday() {
@@ -249,22 +206,14 @@ class CacheManager {
 
   clearAll() {
     this.clearToday()
-
     try {
-      const cachePath = this.historyCachePath
-      if (fs.existsSync(cachePath)) {
-        fs.unlinkSync(cachePath)
-      }
-
-      // 清理所有日期缓存文件
       const files = fs.readdirSync(this.cacheDir)
       for (const file of files) {
         if (file.match(/^today_.*\.json$/)) {
           try { fs.unlinkSync(path.join(this.cacheDir, file)) } catch (e) { /* ignore */ }
         }
       }
-
-      logger.mark(`[${LOG_TAG}] 所有缓存已清除`)
+      logger.mark(`[${LOG_TAG}] 所有今日缓存已清除`)
       return true
     } catch (error) {
       logger.error(`[${LOG_TAG}] 清除所有缓存失败: ${error.message}`)
@@ -274,7 +223,6 @@ class CacheManager {
 
   isValid(data) {
     if (!data || !data._cachedAt) return false
-
     const now = Date.now()
     const age = (now - data._cachedAt) / 1000
     return age < this.ttl
@@ -282,11 +230,8 @@ class CacheManager {
 
   getStatus() {
     const todayExists = fs.existsSync(this.todayCachePath)
-    const historyExists = fs.existsSync(this.historyCachePath)
 
     let todayInfo = null
-    let historyInfo = null
-
     if (todayExists) {
       try {
         const data = JSON.parse(fs.readFileSync(this.todayCachePath, 'utf-8'))
@@ -302,24 +247,8 @@ class CacheManager {
       }
     }
 
-    if (historyExists) {
-      try {
-        const data = JSON.parse(fs.readFileSync(this.historyCachePath, 'utf-8'))
-        historyInfo = {
-          exists: true,
-          recordCount: data.records?.length || 0,
-          updatedAt: data.updatedAt || '--',
-        }
-      } catch (e) {
-        historyInfo = { exists: true, error: e.message }
-      }
-    }
-
-    return {
-      today: todayInfo || { exists: false },
-      history: historyInfo || { exists: false },
-    }
+    return { today: todayInfo || { exists: false } }
   }
 }
 
-export default CacheManager
+export default MerchantCache

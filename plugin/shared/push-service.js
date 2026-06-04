@@ -68,26 +68,46 @@ class PushService {
    *
    * @param {object} merchantImage - 渲染好的图片消息 (segment.image 或 Buffer/路径)
    * @param {object} data - 商人数据
+   * @param {object} [opts]
+   * @param {boolean} [opts.isTest=false] - 是否为测试推送；为 true 时不会覆盖 lastPushedRound/Date
    * @returns {Promise<{total: number, success: number, failed: number, details: Array}>}
    */
-  async pushToAll(merchantImage, data) {
+  async pushToAll(merchantImage, data, opts = {}) {
+    const { isTest = false } = opts
+
     if (this._pushing) {
       logger.debug(`[${LOG_TAG}] 推送进行中，跳过`)
       return { total: 0, success: 0, failed: 0, details: [] }
     }
 
-    if (!this.shouldPush(data)) {
+    if (!isTest && !this.shouldPush(data)) {
       return { total: 0, success: 0, failed: 0, details: [] }
     }
 
     this._pushing = true
+    try {
+      return await this._doPush(merchantImage, data, { isTest })
+    } finally {
+      this._pushing = false
+    }
+  }
+
+  async _doPush(merchantImage, data, { isTest }) {
     const pushConfig = getPushConfig()
     const maxRetries = pushConfig.maxRetries || 3
     const retryDelay = (pushConfig.retryDelaySeconds || 10) * 1000
 
     const subscriptions = this.subscriptionManager.getAll()
     if (subscriptions.length === 0) {
-      this._pushing = false
+      return { total: 0, success: 0, failed: 0, details: [] }
+    }
+
+    // 一次性解析 bot 并缓存整个推送批次内复用，不再每个订阅都遍历 Bot.uin
+    let bot
+    try {
+      bot = this._resolveBot()
+    } catch (error) {
+      logger.error(`[${LOG_TAG}] ${error.message}`)
       return { total: 0, success: 0, failed: 0, details: [] }
     }
 
@@ -96,7 +116,7 @@ class PushService {
       ? `第${roundInfo.current}轮 ${roundInfo.timeLabel}`
       : '新时段'
 
-    logger.mark(`[${LOG_TAG}] 开始推送 ${roundLabel}，共 ${subscriptions.length} 个订阅`)
+    logger.mark(`[${LOG_TAG}] 开始推送 ${roundLabel}，共 ${subscriptions.length} 个订阅${isTest ? '（测试）' : ''}`)
 
     let success = 0
     let failed = 0
@@ -107,17 +127,10 @@ class PushService {
       let lastError = null
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-          // 构造标准消息格式
           const msg = this._buildMessage(merchantImage, sub)
           if (!msg) throw new Error('消息构造失败')
 
-          const result = await this._sendToTarget(sub, msg)
-
-          // 验证发送结果（XRK-AGT框架sendMsg应返回非空值）
-          if (result === undefined || result === false) {
-            throw new Error('sendMsg返回空值，可能发送失败')
-          }
-
+          await this._sendToTarget(bot, sub, msg)
           sent = true
           success++
           details.push({ type: sub.type, id: sub.id, success: true })
@@ -139,11 +152,12 @@ class PushService {
       await this._sleep(500)
     }
 
-    // 更新推送状态
-    this.lastPushedRound = roundInfo?.current || null
-    this.lastPushedDate = getBeijingTime().format('YYYY-MM-DD')
-    this.lastPushTime = Date.now()
-    this._pushing = false
+    // 仅在非测试模式下更新推送状态，避免 #远行商人推送测试 清空去重标志
+    if (!isTest) {
+      this.lastPushedRound = roundInfo?.current || null
+      this.lastPushedDate = getBeijingTime().format('YYYY-MM-DD')
+      this.lastPushTime = Date.now()
+    }
 
     logger.mark(`[${LOG_TAG}] 推送完成: 成功 ${success}，失败 ${failed}`)
 
@@ -176,33 +190,71 @@ class PushService {
   }
 
   /**
-   * 向单个目标发送消息
-   * 使用 bot.sendMsg 便捷方法（支持 { user_id } 或 { group_id } 参数）
-   * @returns {Promise<any>} 发送结果
+   * 解析一个可用的 Bot 实例（一次性，整个推送批次复用）
+   * Bot.uin 可能是 Set/Array/Map，按可迭代对象遍历
    */
-  async _sendToTarget(subscription, msg) {
-    let bot = null
-    for (const id of Bot.uin) {
+  _resolveBot() {
+    if (this._cachedBot && (this._cachedBot.sendMsg || this._cachedBot.pickGroup || this._cachedBot.tasker)) {
+      return this._cachedBot
+    }
+    const uinList = Bot.uin
+    if (!uinList) throw new Error('Bot.uin 不可用，请确认框架已启动 Bot')
+    for (const id of uinList) {
       if (id === 'stdin') continue
       const b = Bot[id]
-      if (b && typeof b.sendMsg === 'function') {
-        bot = b
-        break
+      if (b && (b.sendMsg || b.pickGroup || b.pickFriend || b.tasker)) {
+        this._cachedBot = b
+        return b
       }
     }
-    if (!bot) throw new Error('找不到可用的 Bot 实例')
+    throw new Error('找不到可用的 Bot 实例')
+  }
 
+  /**
+   * 向单个目标发送消息
+   * 优先走框架的 sendGroupMsg/sendFriendMsg（tasker 优先，能正确路由到对应 bot），
+   * 回退到 pickGroup/pickFriend.sendMsg。无返回值校验——sendMsg 返回 undefined 不等于失败。
+   */
+  async _sendToTarget(bot, subscription, msg) {
     if (subscription.type === 'group') {
-      const result = await bot.sendMsg({ group_id: String(subscription.id) }, msg)
-      if (!result) throw new Error(`群 ${subscription.id} 发送失败`)
-      return result
-    } else if (subscription.type === 'private') {
-      const result = await bot.sendMsg({ user_id: String(subscription.id) }, msg)
-      if (!result) throw new Error(`好友 ${subscription.id} 发送失败`)
-      return result
-    } else {
-      throw new Error(`未知订阅类型: ${subscription.type}`)
+      const groupId = Number(subscription.id)
+
+      if (bot.tasker?.sendGroupMsg) {
+        const data = { self_id: bot.uin || bot.self_id, bot, group_id: groupId }
+        return await bot.tasker.sendGroupMsg(data, msg)
+      }
+
+      if (typeof bot.pickGroup === 'function') {
+        const group = bot.pickGroup(groupId)
+        if (group?.sendMsg) return await group.sendMsg(msg)
+      }
+
+      if (typeof bot.sendMsg === 'function') {
+        return await bot.sendMsg({ group_id: groupId }, msg)
+      }
+      throw new Error('当前 Bot 不支持群消息发送')
     }
+
+    if (subscription.type === 'private') {
+      const userId = Number(subscription.id)
+
+      if (bot.tasker?.sendFriendMsg) {
+        const data = { self_id: bot.uin || bot.self_id, bot, user_id: userId }
+        return await bot.tasker.sendFriendMsg(data, msg)
+      }
+
+      if (typeof bot.pickFriend === 'function') {
+        const friend = bot.pickFriend(userId)
+        if (friend?.sendMsg) return await friend.sendMsg(msg)
+      }
+
+      if (typeof bot.sendMsg === 'function') {
+        return await bot.sendMsg({ user_id: userId }, msg)
+      }
+      throw new Error('当前 Bot 不支持好友消息发送')
+    }
+
+    throw new Error(`未知订阅类型: ${subscription.type}`)
   }
 
   getStatus() {

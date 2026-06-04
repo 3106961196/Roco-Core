@@ -1,4 +1,5 @@
-import CacheManager from './cache.js'
+import MerchantCache from './cache/merchant-cache.js'
+import HistoryCache from './cache/history-cache.js'
 import BrowserManager from './browser.js'
 import IconManager from './icon-manager.js'
 import { getBeijingTime, shouldDetectNow, getRoundInfo } from './time-utils.js'
@@ -11,7 +12,8 @@ class MerchantCrawler {
     const detectionConfig = getDetectionConfig()
     const merchantConfig = getMerchantConfig()
 
-    this.cache = new CacheManager()
+    this.cache = new MerchantCache()
+    this.historyCache = new HistoryCache()
     this.browserManager = new BrowserManager()
     this.iconManager = new IconManager()
 
@@ -317,7 +319,7 @@ class MerchantCrawler {
           })),
         }
         await this.cache.setToday(cacheData)
-        this.cache.batchAppendToHistory(data.products.map(p => ({
+        this.historyCache.batchAppendToHistory(data.products.map(p => ({
           name: p.name,
           price: p.price,
           buyLimit: p.buyLimit,

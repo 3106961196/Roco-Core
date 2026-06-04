@@ -1,4 +1,5 @@
 import RendererLoader from '../../../../src/infrastructure/renderer/loader.js'
+import { getBrowserConfig } from './config.js'
 
 const LOG_TAG = '[RocoCore-Browser]'
 
@@ -9,6 +10,7 @@ const LOG_TAG = '[RocoCore-Browser]'
 class BrowserManager {
   constructor() {
     this._renderer = null
+    this._warnedExePath = false
   }
 
   /**
@@ -29,24 +31,28 @@ class BrowserManager {
   async init() {
     const renderer = await this._getRenderer()
 
-    if (renderer?.browser) {
-      // 验证浏览器是否存活
-      try {
-        const testPage = await renderer.browser.newPage()
-        await testPage.close()
-        return renderer.browser
-      } catch (e) {
-        logger.warn(`${LOG_TAG} 渲染器浏览器不可用，尝试重新初始化: ${e.message}`)
-      }
+    if (!renderer) {
+      throw new Error('框架渲染器未加载，请检查 src/renderers/ 下是否配置了 puppeteer 或 playwright')
     }
 
-    // 触发渲染器浏览器初始化
+    if (renderer?.browser?.isConnected?.()) {
+      return renderer.browser
+    }
+
     if (renderer?.browserInit) {
       await renderer.browserInit()
       if (renderer.browser) {
         logger.debug(`${LOG_TAG} 已通过框架渲染器启动浏览器`)
         return renderer.browser
       }
+    }
+
+    // 提示：merchant.browser.executablePath 仅作为配置项占位提示，
+    // 真实生效位置是 src/renderers/puppeteer|playwright/config.yaml 的 chromiumPath
+    const exePath = getBrowserConfig()?.executablePath
+    if (exePath && !this._warnedExePath) {
+      logger.warn(`${LOG_TAG} merchant.browser.executablePath 已配置但本插件不直接使用，请把 ${exePath} 写入框架渲染器配置(puppeteer/playwright.config.yaml)的 chromiumPath 字段`)
+      this._warnedExePath = true
     }
 
     throw new Error('无法获取框架渲染器浏览器实例，请检查渲染器配置')

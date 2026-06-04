@@ -1,41 +1,29 @@
 import MerchantCrawler from './shared/crawler.js'
+import MerchantRenderer from './shared/renderer.js'
+import MerchantScheduler from './shared/scheduler.js'
 import PushService from './shared/push-service.js'
 import SubscriptionManager from './shared/subscription-manager.js'
 import { getBeijingTime, getRoundInfo } from './shared/time-utils.js'
-import { PATHS } from './shared/paths.js'
 import { getUIConfig, getPushConfig } from './shared/config.js'
-import RendererLoader from '../../../src/infrastructure/renderer/loader.js'
-import path from 'path'
-import fs from 'node:fs/promises'
 
 const LOG_TAG = '洛克王国-远行商人'
 
-// 模块级单例锁，防止插件被多次实例化导致重复执行
-let _singletonInstance = null
-
-// 模板目录: core/Roco-Core/resources/远行商人/
-const TPL_DIR = path.join(PATHS.BASE_DIR, 'resources', '远行商人')
-const TPL_FILE = path.join(TPL_DIR, 'merchant.html')
+// 模块级单例锁：跨实例共享组件（防止 plugin 被多次实例化导致重复执行）
+let _sharedComponents = null
 
 /**
- * 将绝对路径转为 file:/// URL（Windows 兼容）
+ * 远行商人插件 - 入口
+ *
+ * 职责：
+ * - 解析用户命令 (#远行商人 / 订阅 / 状态 / 强制刷新 等)
+ * - 路由到对应的 service / scheduler
+ *
+ * 不再持有以下细节（已迁出）：
+ * - 抓取 / 缓存 → shared/crawler.js
+ * - 渲染数据准备 / 图片渲染 → shared/renderer.js
+ * - 定时调度 / 补抓 / 推送触发 → shared/scheduler.js
+ * - 推送 / 订阅 / 历史 → shared/push-service.js + subscription-manager.js
  */
-function toFileUrl(absPath) {
-  const p = String(absPath).replace(/\\/g, '/')
-  return (p.startsWith('/') ? 'file://' : 'file:///') + p
-}
-
-/**
- * 获取商品图标本地路径（用于渲染）
- */
-function getIconUrl(iconManager, name) {
-  if (iconManager.hasIcon(name)) {
-    const localPath = iconManager.getLocalIconPath(name).replace(/\\/g, '/')
-    return `file:///${localPath}`
-  }
-  return ''
-}
-
 export class RocoMerchant extends plugin {
   constructor() {
     super({
@@ -44,326 +32,82 @@ export class RocoMerchant extends plugin {
       event: 'message',
       priority: 5000,
       rule: [
-        {
-          reg: '^#?远行商人$',
-          fnc: 'queryMerchant',
-          log: true
-        },
-        {
-          reg: '^#?远行商人订阅$',
-          fnc: 'subscribeMerchant',
-          log: true
-        },
-        {
-          reg: '^#强制刷新远行人$',
-          fnc: 'forceRefresh',
-          permission: 'master',
-          log: true
-        },
-        {
-          reg: '^#?远行商人状态$',
-          fnc: 'showStatus',
-          permission: 'master',
-          log: true
-        },
-        {
-          reg: '^#?远行商人取消订阅$',
-          fnc: 'unsubscribeMerchant',
-          permission: 'master',
-          log: true
-        },
-        {
-          reg: '^#?远行商人订阅列表$',
-          fnc: 'listSubscriptions',
-          permission: 'master',
-          log: true
-        },
-        {
-          reg: '^#?远行商人推送测试$',
-          fnc: 'testPush',
-          permission: 'master',
-          log: true
-        }
-      ]
+        { reg: '^#?远行商人$', fnc: 'queryMerchant', log: true },
+        { reg: '^#?远行商人订阅$', fnc: 'subscribeMerchant', log: true },
+        { reg: '^#强制刷新远行人$', fnc: 'forceRefresh', permission: 'master', log: true },
+        { reg: '^#?远行商人状态$', fnc: 'showStatus', permission: 'master', log: true },
+        { reg: '^#?远行商人取消订阅$', fnc: 'unsubscribeMerchant', permission: 'master', log: true },
+        { reg: '^#?远行商人订阅列表$', fnc: 'listSubscriptions', permission: 'master', log: true },
+        { reg: '^#?远行商人推送测试$', fnc: 'testPush', permission: 'master', log: true },
+      ],
     })
   }
 
-  async ensureReady() {
+  /**
+   * 初始化：构造 crawler / renderer / scheduler（单例）
+   * 框架首次调用 rule 中的方法前会自动调用 init()
+   */
+  async init() {
     if (this._initPromise) return this._initPromise
     this._initPromise = this._doInit()
     return this._initPromise
   }
 
   async _doInit() {
-    // 单例保护：如果已有一个实例在运行，共享其组件引用
-    if (_singletonInstance && _singletonInstance._initialized) {
+    if (_sharedComponents && _sharedComponents._initialized) {
       logger.debug(`[${LOG_TAG}] 插件已初始化，共享单例组件`)
-      this.crawler = _singletonInstance.crawler
-      this.subscriptionManager = _singletonInstance.subscriptionManager
-      this.pushService = _singletonInstance.pushService
-      this._initialized = true
+      this.bindComponents(_sharedComponents)
       return
     }
-    _singletonInstance = this
 
-    this.crawler = new MerchantCrawler()
-    this.subscriptionManager = new SubscriptionManager()
-    this.pushService = new PushService(this.subscriptionManager)
-    this.lastDetectionTime = null
-    this.internalTimer = null
-
-    // 启动时同步当前轮次号，但不触发推送
-    // 只有后续调度中发现轮次变化才是真正的"新轮次到点"
-    const bootRoundInfo = getRoundInfo()
-    this.currentRoundIndex = bootRoundInfo.current
-    this.roundDataFetched = false
-
-    // 框架重启后：将推送状态同步到当前轮次，防止重启后误推
-    // 这样 shouldPush 的 lastPushedRound/lastPushedDate 会匹配当前轮次，不会重复推送
-    if (bootRoundInfo.current > 0) {
-      this.pushService.lastPushedRound = bootRoundInfo.current
-      this.pushService.lastPushedDate = getBeijingTime().format('YYYY-MM-DD')
-      logger.debug(`[${LOG_TAG}] 重启同步: 第${bootRoundInfo.current}轮，禁止重启推送`)
-    }
-
-    // 绑定检测成功回调，触发推送
-    this.crawler.onDetectionSuccess = (data) => this.onDetectionSuccess(data)
-
-    await this.crawler.init()
-    this.startInternalScheduler()
-
-    // 标记初始化完成
-    this._initialized = true
-  }
-
-  async init() {
-    await this.ensureReady()
-  }
-
-  startInternalScheduler() {
-    if (this.internalTimer) {
-      clearInterval(this.internalTimer)
-    }
-
-    this.internalTimer = setInterval(() => {
-      this.scheduleDetection().catch(e => {
-        logger.error(`[${LOG_TAG}] 调度异常: ${e.message}`)
-      })
-    }, 60 * 1000)
-
-    this.scheduleDetection().catch(() => {})
-  }
-
-  // ========== 渲染数据准备 ==========
-
-  /**
-   * 准备渲染数据 - 根据当前轮次决定历史商品显示范围
-   *
-   * 显示规则:
-   * - 第1轮: 本轮新商品 + 昨日四次推送的已过期商品
-   * - 第2轮: 本轮新商品 + 今日已过期的第1轮商品
-   * - 第3轮: 本轮新商品 + 今日已过期的第1、2轮商品
-   * - 第4轮: 本轮新商品 + 今日已过期的第1、2、3轮商品
-   */
-  prepareRenderData(data) {
-    const resPrefix = toFileUrl(TPL_DIR) + '/'
-    const uiConfig = getUIConfig()
-    // 时间相关字段实时计算，避免使用缓存中冻结的倒计时
-    const liveRoundInfo = getRoundInfo()
-    const currentRound = liveRoundInfo.current || 1
-
-    // 当前轮次商品
-    const currentProducts = (data.products || []).map(p => {
-      const priceNum = this.crawler.parsePrice(p.price)
-      const limitNum = parseInt(p.buyLimit || p.limit) || 0
-      const totalCost = priceNum * limitNum
-      return {
-        name: p.name,
-        iconUrl: getIconUrl(this.crawler.iconManager, p.name),
-        price: p.price || '未知',
-        priceDisplay: priceNum > 0 ? priceNum.toLocaleString() : p.price || '未知',
-        limit: p.buyLimit || p.limit || '-',
-        totalCost,
-        totalCostDisplay: totalCost > 0 ? totalCost.toLocaleString() : '-',
-      }
+    const crawler = new MerchantCrawler()
+    const subscriptionManager = new SubscriptionManager()
+    const pushService = new PushService(subscriptionManager)
+    const renderer = new MerchantRenderer({ crawler })
+    const scheduler = new MerchantScheduler({
+      crawler,
+      renderer,
+      subscriptionManager,
+      pushService,
     })
 
-    // 当前轮次商品名集合，用于从历史时段中去重
-    const currentProductNames = new Set(currentProducts.map(p => p.name))
-
-    // 历史商品: 从今日爬取数据中的已结束时段获取
-    // 已结束时段中，排除同时出现在当前轮次的商品（避免重复显示）
-    const todayEnded = (data.historyGroups || [])
-      .filter(g => g.statusLabel === '已结束')
-      .map(g => ({
-        time: g.timeLabel || '--:--',
-        status: 'ended',
-        products: (g.products || [])
-          .filter(p => !currentProductNames.has(p.name))
-          .map(p => ({
-            name: p.name,
-            iconUrl: getIconUrl(this.crawler.iconManager, p.name),
-          })),
-      }))
-      // 过滤掉商品全部被去重后为空的时段
-      .filter(g => g.products.length > 0)
-
-    // 第1轮需要额外显示昨日的全部已过期商品
-    let yesterdayEnded = []
-    if (currentRound === 1) {
-      yesterdayEnded = this._loadYesterdayHistory()
-    }
-
-    // 合并: 昨日历史在前，今日已结束在后
-    const otherPeriods = [...yesterdayEnded, ...todayEnded]
-
-    return {
-      saveId: `merchant_${Date.now()}`,
-      tplFile: TPL_FILE,
-      imgType: uiConfig.format || 'jpeg',
-      quality: uiConfig.imageQuality || 90,
-      sys: { scale: 3 },
-      resPrefix,
-
-      date: data.date || getBeijingTime().format('YYYY-MM-DD'),
-      currentRound,
-      totalRounds: liveRoundInfo.total || 4,
-      remainingTime: liveRoundInfo.countdown || '--',
-      nextRoundTime: '',
-      isClosed: false,
-
-      currentProducts,
-      otherPeriods,
-    }
+    this.bindComponents({ crawler, renderer, scheduler, subscriptionManager, pushService })
+    await scheduler.init()
+    _sharedComponents = this.components
   }
 
   /**
-   * 闭市时段(0:00-8:00)的渲染数据：显示昨日全天四次推送的已过期商品
-   * 兼容JSON文件不存在或仅包含部分数据的情况
+   * 把组件绑定到 this 上，方便命令方法访问
    */
-  prepareClosedData(roundInfo) {
-    const resPrefix = toFileUrl(TPL_DIR) + '/'
-    const uiConfig = getUIConfig()
-    // 实时计算倒计时，避免使用冻结的缓存数据
-    const liveRoundInfo = getRoundInfo()
-
-    const otherPeriods = this._loadYesterdayHistory()
-
-    return {
-      saveId: `merchant_closed_${Date.now()}`,
-      tplFile: TPL_FILE,
-      imgType: uiConfig.format || 'jpeg',
-      quality: uiConfig.imageQuality || 90,
-      sys: { scale: 3 },
-      resPrefix,
-
-      date: getBeijingTime().format('YYYY-MM-DD'),
-      currentRound: 0,
-      totalRounds: liveRoundInfo.total,
-      remainingTime: '',
-      nextRoundTime: liveRoundInfo.countdown,
-      isClosed: true,
-
-      currentProducts: [],
-      otherPeriods,
-    }
-  }
-
-  /**
-   * 加载昨日历史商品数据（用于闭市时段和第1轮显示）
-   * 兼容JSON文件不存在或仅包含部分轮次数据的情况
-   */
-  _loadYesterdayHistory() {
-    try {
-      const yesterdayData = this.crawler.cache.getYesterday()
-      if (!yesterdayData) return []
-
-      const groups = []
-
-      // 优先从 historyGroups 提取（包含完整时段信息）
-      if (yesterdayData.historyGroups && yesterdayData.historyGroups.length > 0) {
-        for (const g of yesterdayData.historyGroups) {
-          groups.push({
-            time: `昨日 ${g.timeLabel || '--:--'}`,
-            status: 'ended',
-            products: (g.products || []).map(p => ({
-              name: p.name,
-              iconUrl: getIconUrl(this.crawler.iconManager, p.name),
-            })),
-          })
-        }
-        return groups
-      }
-
-      // 回退: 从 products 列表构建（仅有一轮数据的情况）
-      if (yesterdayData.products && yesterdayData.products.length > 0) {
-        const timeLabel = yesterdayData.roundInfo?.timeLabel || '昨日'
-        groups.push({
-          time: `昨日 ${timeLabel}`,
-          status: 'ended',
-          products: yesterdayData.products.map(p => ({
-            name: p.name,
-            iconUrl: getIconUrl(this.crawler.iconManager, p.name),
-          })),
-        })
-      }
-
-      return groups
-    } catch (error) {
-      logger.debug(`[${LOG_TAG}] 加载昨日历史失败: ${error.message}`)
-      return []
-    }
-  }
-
-  /**
-   * 使用框架渲染器直接渲染图片
-   */
-  async renderImage(renderData) {
-    try {
-      await RendererLoader.ensureLoaded()
-      const renderer = RendererLoader.getRenderer()
-      if (!renderer) {
-        logger.error(`[${LOG_TAG}] 渲染器不可用`)
-        return false
-      }
-      const img = await renderer.render('远行商人', renderData)
-      if (!img) return false
-
-      // 渲染完成后删除临时 HTML 文件，避免被框架定时清理误删
-      if (renderData.saveId) {
-        const htmlPath = `./trash/html/远行商人/${renderData.saveId}.html`
-        fs.unlink(htmlPath).catch(() => {})
-      }
-
-      return img
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 渲染图片失败: ${error.message}`)
-      return false
-    }
+  bindComponents(components) {
+    this.components = components
+    this.crawler = components.crawler
+    this.renderer = components.renderer
+    this.scheduler = components.scheduler
+    this.subscriptionManager = components.subscriptionManager
+    this.pushService = components.pushService
   }
 
   // ========== 用户命令 ==========
 
   async queryMerchant(e) {
     try {
-      await this.ensureReady()
+      await this.init()
       const roundInfo = getRoundInfo()
 
       // 0:00-8:00 闭市时段：不爬取，显示昨日已过期商品
       if (roundInfo.status === 'closed') {
-        const renderData = this.prepareClosedData(roundInfo)
-        const result = await this.renderImage(renderData)
+        const renderData = this.renderer.prepareClosedData(roundInfo)
+        const result = await this.renderer.renderImage(renderData)
         if (result) {
-          await this.reply(e.segment.image(result))
+          await this.reply(segment.image(result))
         } else {
           await this.reply(`今日已闭市\n下一轮：${roundInfo.countdown}`)
         }
         return true
       }
 
-      // 获取数据
       const data = await this.crawler.getData(false)
-
       if (!data || !data.success) {
         const errorMsg = data?.error || '无法获取数据，请稍后重试'
         await this.reply(`获取失败: ${errorMsg}`)
@@ -381,20 +125,16 @@ export class RocoMerchant extends plugin {
         return true
       }
 
-      // 补全缺失的图标（渲染前确保图标就绪）
-      await this._ensureIcons(data.products)
-
-      // 渲染图片
-      const renderData = this.prepareRenderData(data)
-      const result = await this.renderImage(renderData)
+      await this.renderer.ensureIcons(data.products)
+      const renderData = this.renderer.prepareRenderData(data)
+      const result = await this.renderer.renderImage(renderData)
       if (result) {
-        await this.reply(e.segment.image(result))
+        await this.reply(segment.image(result))
         return true
       } else {
         await this.reply('图片生成失败，请稍后重试')
         return false
       }
-
     } catch (error) {
       logger.error(`[${LOG_TAG}] 查询异常: ${error.message}`)
       await this.reply(`查询出错: ${error.message}`)
@@ -404,9 +144,10 @@ export class RocoMerchant extends plugin {
 
   async showStatus(e) {
     try {
-      await this.ensureReady()
+      await this.init()
       const roundInfo = getRoundInfo()
       const cacheStatus = this.crawler.cache.getStatus()
+      const historyStatus = this.crawler.historyCache.getStatus()
       const pushStatus = this.pushService.getStatus()
       const pushConfig = getPushConfig()
 
@@ -434,9 +175,9 @@ export class RocoMerchant extends plugin {
         msg += `\n今日缓存：不存在\n`
       }
 
-      if (cacheStatus.history.exists) {
-        msg += `\n历史记录：存在 (${cacheStatus.history.recordCount || 0}条)\n`
-        msg += `  最后更新：${cacheStatus.history.updatedAt || '--'}\n`
+      if (historyStatus.exists) {
+        msg += `\n历史记录：存在 (${historyStatus.recordCount || 0}条)\n`
+        msg += `  最后更新：${historyStatus.updatedAt || '--'}\n`
       } else {
         msg += `\n历史记录：暂无\n`
       }
@@ -460,7 +201,6 @@ export class RocoMerchant extends plugin {
 
       await this.reply(msg)
       return true
-
     } catch (error) {
       logger.error(`[${LOG_TAG}] 状态查询异常: ${error.message}`)
       await this.reply(`状态查询失败: ${error.message}`)
@@ -470,28 +210,21 @@ export class RocoMerchant extends plugin {
 
   async forceRefresh(e) {
     try {
-      await this.ensureReady()
+      await this.init()
       await this.reply('正在强制刷新远行商人数据...')
 
-      this.roundDataFetched = false
-      await this.crawler.cache.clearAll()
-
-      const data = await this.crawler.getData(true)
-
+      const data = await this.scheduler.forceRefresh()
       if (!data || !data.success) {
         await this.reply(`刷新失败: ${data?.error || '未知错误'}`)
         return false
       }
 
       if (data.productCount > 0) {
-        // 补全图标
-        await this._ensureIcons(data.products)
-
-        const renderData = this.prepareRenderData(data)
-        const result = await this.renderImage(renderData)
-
+        await this.renderer.ensureIcons(data.products)
+        const renderData = this.renderer.prepareRenderData(data)
+        const result = await this.renderer.renderImage(renderData)
         if (result) {
-          await this.reply(e.segment.image(result))
+          await this.reply(segment.image(result))
           return true
         }
       }
@@ -499,7 +232,6 @@ export class RocoMerchant extends plugin {
       const names = (data.products || []).map(p => p.name).join('、')
       await this.reply(`刷新成功！当前售卖：${names || '暂无商品'}`)
       return true
-
     } catch (error) {
       logger.error(`[${LOG_TAG}] 强制刷新异常: ${error.message}`)
       await this.reply(`刷新失败: ${error.message}`)
@@ -507,12 +239,9 @@ export class RocoMerchant extends plugin {
     }
   }
 
-  // ========== 订阅管理命令 ==========
-
   async subscribeMerchant(e) {
     try {
-      await this.ensureReady()
-
+      await this.init()
       if (!this.pushService.isEnabled()) {
         await this.reply('推送功能未启用，请联系管理员开启')
         return false
@@ -521,7 +250,6 @@ export class RocoMerchant extends plugin {
       const isGroup = e.isGroup
       const type = isGroup ? 'group' : 'private'
       const id = isGroup ? e.group_id : e.user_id
-
       if (!id) {
         await this.reply('无法识别目标，请稍后重试')
         return false
@@ -540,7 +268,6 @@ export class RocoMerchant extends plugin {
       } else {
         await this.reply(result.msg)
       }
-
       return true
     } catch (error) {
       logger.error(`[${LOG_TAG}] 订阅异常: ${error.message}`)
@@ -551,26 +278,22 @@ export class RocoMerchant extends plugin {
 
   async unsubscribeMerchant(e) {
     try {
-      await this.ensureReady()
-
+      await this.init()
       const isGroup = e.isGroup
       const type = isGroup ? 'group' : 'private'
       const id = isGroup ? e.group_id : e.user_id
-
       if (!id) {
         await this.reply('无法识别目标，请稍后重试')
         return false
       }
 
       const result = this.subscriptionManager.unsubscribe(type, String(id))
-
       if (result.ok) {
         const targetDesc = isGroup ? `本群` : '你'
         await this.reply(`${targetDesc}已取消远行商人订阅`)
       } else {
         await this.reply(result.msg)
       }
-
       return true
     } catch (error) {
       logger.error(`[${LOG_TAG}] 取消订阅异常: ${error.message}`)
@@ -581,8 +304,7 @@ export class RocoMerchant extends plugin {
 
   async listSubscriptions(e) {
     try {
-      await this.ensureReady()
-
+      await this.init()
       const all = this.subscriptionManager.getAll()
       const stats = this.subscriptionManager.getStats()
 
@@ -611,8 +333,7 @@ export class RocoMerchant extends plugin {
 
   async testPush(e) {
     try {
-      await this.ensureReady()
-
+      await this.init()
       if (!this.pushService.isEnabled()) {
         await this.reply('推送功能未启用')
         return false
@@ -628,24 +349,21 @@ export class RocoMerchant extends plugin {
 
       const roundInfo = getRoundInfo()
       let merchantImage = null
-
       if (roundInfo.status !== 'closed') {
         const data = await this.crawler.getData(false)
         if (data?.success && data.productCount > 0) {
-          await this._ensureIcons(data.products)
-          const renderData = this.prepareRenderData(data)
-          merchantImage = await this.renderImage(renderData)
+          await this.renderer.ensureIcons(data.products)
+          const renderData = this.renderer.prepareRenderData(data)
+          merchantImage = await this.renderer.renderImage(renderData)
         }
       }
 
-      // 重置推送状态以允许测试推送
       this.pushService.resetPushState()
-
       const result = await this.pushService.pushToAll(merchantImage, {
         roundInfo,
         products: [],
         success: true,
-      })
+      }, { isTest: true })
 
       await this.reply(`推送测试完成\n总计: ${result.total}\n成功: ${result.success}\n失败: ${result.failed}`)
       return true
@@ -656,121 +374,9 @@ export class RocoMerchant extends plugin {
     }
   }
 
-  // ========== 定时检测与推送 ==========
-
-  /**
-   * 定时调度检测
-   *
-   * 规则:
-   * - 0:00-8:00 闭市时段：禁止爬取、禁止推送
-   * - 8:00-12:00 第1轮：等待1分钟后开始抓取，成功后停止，最多30次
-   * - 12:00-16:00 第2轮：执行抓取
-   * - 16:00-20:00 第3轮：执行抓取
-   * - 20:00-24:00 第4轮：执行抓取
-   */
-  async scheduleDetection() {
-    try {
-      const roundInfo = getRoundInfo()
-
-      // 闭市时段：禁止爬取和推送
-      if (roundInfo.status === 'closed') {
-        return
-      }
-
-      // 等待中（轮次刚开始但还在延迟期内）：跳过
-      if (roundInfo.status === 'waiting') {
-        return
-      }
-
-      // 检测新轮次
-      if (roundInfo.current !== this.currentRoundIndex) {
-        this.currentRoundIndex = roundInfo.current
-        this.roundDataFetched = false
-        logger.mark(`[${LOG_TAG}] 第${roundInfo.current}轮 ${roundInfo.timeLabel}`)
-      }
-
-      // 已获取过本轮数据或正在检测中：跳过
-      if (this.roundDataFetched || this.crawler.isDetecting) {
-        return
-      }
-
-      // 检查今日缓存是否已有本轮有效数据
-      try {
-        const cached = await this.crawler.cache.getToday()
-        if (cached && this.crawler.cache.isValid(cached) && cached.productCount > 0) {
-          // 缓存有效，标记本轮已获取
-          this.roundDataFetched = true
-          return
-        }
-      } catch (e) {
-        // 缓存读取失败时继续执行检测
-      }
-
-      this.lastDetectionTime = Date.now()
-      this.crawler.startDetection()
-
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 调度异常: ${error.message}`)
-    }
-  }
-
-  /**
-   * 检测成功后触发推送
-   * 流程: 检查图标 → 补全图标 → 渲染图片 → 推送
-   */
-  async onDetectionSuccess(data) {
-    // 闭市时段禁止推送
-    const roundInfo = data?.roundInfo
-    if (!roundInfo || roundInfo.status === 'closed') return
-
-    if (!this.pushService.isEnabled()) return
-    if (!this.pushService.shouldPush(data)) return
-
-    try {
-      // 1. 确保所有商品图标已下载
-      await this._ensureIcons(data.products)
-
-      // 2. 渲染图片
-      let merchantImage = null
-      if (data.productCount > 0) {
-        const renderData = this.prepareRenderData(data)
-        merchantImage = await this.renderImage(renderData)
-      }
-
-      // 3. 推送
-      await this.pushService.pushToAll(merchantImage, data)
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 推送执行异常: ${error.message}`)
-    }
-  }
-
-  /**
-   * 确保商品图标已下载到本地
-   * 在渲染和推送前调用，保证图片能正常显示
-   */
-  async _ensureIcons(products) {
-    if (!products || products.length === 0) return
-
-    // 只对有icon URL且本地缺失的商品尝试下载
-    const needDownload = products.filter(p =>
-      p.name && !this.crawler.iconManager.hasIcon(p.name) && p.icon
-    )
-    if (needDownload.length > 0) {
-      logger.debug(`[${LOG_TAG}] 补全图标: ${needDownload.length} 个缺失`)
-      await this.crawler.iconManager.batchDownloadIcons(needDownload, 3)
-    }
-  }
-
   async destroy() {
-    if (this.internalTimer) {
-      clearInterval(this.internalTimer)
-      this.internalTimer = null
-    }
-
-    try {
-      await this.crawler.destroy()
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 清理失败: ${error.message}`)
+    if (this.scheduler) {
+      await this.scheduler.destroy()
     }
   }
 }

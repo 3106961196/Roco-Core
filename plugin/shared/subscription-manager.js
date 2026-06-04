@@ -64,6 +64,11 @@ class SubscriptionManager {
 
   /**
    * 添加订阅
+   *
+   * 上限语义：maxSubscriptionsPerTarget 表示「每个 (type,id) 最多允许的订阅记录数」。
+   * 当上限 >= 1 时按 (type,id) 维度去重；上限 > 1 时允许同一目标被多个用户分别订阅，
+   * 用于"不同管理员分别为同一个群订阅"的场景。
+   *
    * @param {object} info - { type, id, subscribedBy, group_id? }
    * @returns {{ ok: boolean, msg: string }}
    */
@@ -78,17 +83,17 @@ class SubscriptionManager {
       return { ok: false, msg: '无效的订阅类型' }
     }
 
-    const key = this._makeKey(type, id)
-    const existing = this._data.subscriptions.find(s => this._makeKey(s.type, s.id) === key)
-
-    if (existing) {
-      return { ok: false, msg: '已经订阅过了' }
-    }
-
     const subConfig = getSubscriptionConfig()
-    const sameTargetCount = this._data.subscriptions.filter(s => s.type === type && s.id === id).length
-    if (sameTargetCount >= (subConfig.maxSubscriptionsPerTarget || 1)) {
-      return { ok: false, msg: '该目标已达到订阅上限' }
+    const maxPerTarget = subConfig.maxSubscriptionsPerTarget || 1
+
+    const sameTargetCount = this._data.subscriptions.filter(
+      s => s.type === type && String(s.id) === String(id)
+    ).length
+    if (sameTargetCount >= maxPerTarget) {
+      if (maxPerTarget === 1) {
+        return { ok: false, msg: '该目标已订阅过了' }
+      }
+      return { ok: false, msg: `该目标已达到订阅上限(${maxPerTarget})` }
     }
 
     this._data.subscriptions.push({

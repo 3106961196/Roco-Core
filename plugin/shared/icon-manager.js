@@ -3,6 +3,7 @@ import path from 'path'
 import http from 'http'
 import https from 'https'
 import { PATHS } from './paths.js'
+import { getMerchantConfig } from './config.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 const ICON_CACHE_DIR = PATHS.ICON_CACHE_DIR
@@ -108,6 +109,12 @@ class IconManager {
       // 缩略图URL转原图URL
       const iconUrl = pageUrl.replace(/\/thumb\//, '/').replace(/\/\d+px-[^/]+$/, '')
 
+      // 转换后的 URL host 与原始 pageUrl 一致（仅路径替换），但仍显式校验一次
+      if (!this.isAllowedUrl(iconUrl)) {
+        logger.warn(`[${LOG_TAG}] 转换后 URL 不在白名单: ${iconUrl}`)
+        return null
+      }
+
       const outputPath = this.getLocalIconPath(itemName)
       await this._downloadImage(iconUrl, outputPath)
       logger.debug(`[${LOG_TAG}] 图标下载成功: ${itemName}`)
@@ -120,8 +127,12 @@ class IconManager {
 
   _downloadImage(imageUrl, outputPath) {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('下载超时')), 15000)
+      const timeout = setTimeout(() => {
+        req?.destroy?.()
+        reject(new Error('下载超时'))
+      }, 15000)
       let redirectCount = 0
+      let req = null
 
       const doRequest = (url) => {
         if (redirectCount >= MAX_REDIRECTS) {
@@ -130,11 +141,26 @@ class IconManager {
           return
         }
 
-        const parsedUrl = new URL(url)
+        // 每次跳转（包含初始请求）都校验白名单，防止重定向逃逸到内网/任意域名
+        if (!this.isAllowedUrl(url)) {
+          clearTimeout(timeout)
+          reject(new Error(`域名不在白名单: ${url}`))
+          return
+        }
+
+        let parsedUrl
+        try {
+          parsedUrl = new URL(url)
+        } catch {
+          clearTimeout(timeout)
+          reject(new Error(`URL 解析失败: ${url}`))
+          return
+        }
+
         const httpModule = parsedUrl.protocol === 'http:' ? http : https
         redirectCount++
 
-        httpModule.get(url, {
+        req = httpModule.get(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': 'https://wiki.biligame.com/',
@@ -142,6 +168,7 @@ class IconManager {
         }, (response) => {
           if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
             const redirectUrl = new URL(response.headers.location, url).href
+            response.resume()
             doRequest(redirectUrl)
             return
           }
@@ -151,8 +178,28 @@ class IconManager {
             return
           }
 
+          // 校验 Content-Type 必须为图片，避免 HTML/JSON 错误页被当作图标落地
+          const ct = response.headers['content-type'] || ''
+          if (!ct.startsWith('image/')) {
+            clearTimeout(timeout)
+            response.resume()
+            reject(new Error(`非图片类型: ${ct}`))
+            return
+          }
+
           const chunks = []
-          response.on('data', chunk => chunks.push(chunk))
+          let totalBytes = 0
+          const MAX_BYTES = 5 * 1024 * 1024 // 5MB 上限，避免内存爆掉
+          response.on('data', (chunk) => {
+            totalBytes += chunk.length
+            if (totalBytes > MAX_BYTES) {
+              clearTimeout(timeout)
+              response.destroy()
+              reject(new Error('图片数据超过 5MB 上限'))
+              return
+            }
+            chunks.push(chunk)
+          })
           response.on('end', () => {
             clearTimeout(timeout)
             const buffer = Buffer.concat(chunks)
@@ -163,7 +210,13 @@ class IconManager {
             fs.writeFileSync(outputPath, buffer)
             resolve(outputPath)
           })
-        }).on('error', (err) => {
+          response.on('error', (err) => {
+            clearTimeout(timeout)
+            reject(err)
+          })
+        })
+
+        req.on('error', (err) => {
           clearTimeout(timeout)
           reject(err)
         })
@@ -201,8 +254,45 @@ class IconManager {
     return results
   }
 
+  /**
+   * 复制基础资源（bg.jpg / coin.png / yuanxingshangren.png）到 merchant 缓存目录
+   * 渲染时通过 resPrefix 引用本地副本，避免模板里写绝对路径
+   *
+   * 来源目录由配置 merchant.assets.sourceDir 指定；留空则跳过。
+   * 目标目录：data/Roco-data/cache/merchant/
+   */
   copyBaseAssets() {
-    return true
+    const merchantConfig = getMerchantConfig() || {}
+    const sourceDir = merchantConfig.assets?.sourceDir
+    if (!sourceDir || !fs.existsSync(sourceDir)) {
+      logger.debug(`[${LOG_TAG}] 跳过基础资源复制: 未配置 sourceDir 或目录不存在`)
+      return false
+    }
+
+    const targetDir = PATHS.MERCHANT_CACHE_DIR
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true })
+    }
+
+    const files = ['bg.jpg', 'coin.png', 'yuanxingshangren.png']
+    let copied = 0
+    for (const name of files) {
+      const src = path.join(sourceDir, name)
+      const dst = path.join(targetDir, name)
+      if (!fs.existsSync(src)) continue
+      try {
+        // 始终覆盖，确保用户更新资源后下次启动能拉到最新版
+        fs.copyFileSync(src, dst)
+        copied++
+      } catch (e) {
+        logger.warn(`[${LOG_TAG}] 复制资源失败 ${name}: ${e.message}`)
+      }
+    }
+
+    if (copied > 0) {
+      logger.mark(`[${LOG_TAG}] 已复制 ${copied} 个基础资源到 ${targetDir}`)
+    }
+    return copied > 0
   }
 }
 
