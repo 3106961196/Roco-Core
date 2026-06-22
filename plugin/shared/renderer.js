@@ -209,6 +209,15 @@ class MerchantRenderer {
         logger.error(`[${LOG_TAG}] 渲染器不可用`)
         return false
       }
+
+      // 目录可能被框架清理，渲染前确保目录存在
+      const htmlDir = './trash/html/远行商人'
+      try {
+        await fs.access(htmlDir)
+      } catch {
+        await fs.mkdir(htmlDir, { recursive: true })
+      }
+
       const img = await renderer.render('远行商人', renderData)
       if (!img) return false
 
