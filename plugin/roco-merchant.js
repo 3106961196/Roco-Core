@@ -1,3 +1,4 @@
+import plugin from '#infrastructure/plugins/plugin.js'
 import MerchantCrawler from './shared/crawler.js'
 import MerchantRenderer from './shared/renderer.js'
 import MerchantScheduler from './shared/scheduler.js'
