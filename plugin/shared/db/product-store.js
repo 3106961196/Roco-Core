@@ -163,6 +163,7 @@ class ProductStore {
 }
 
 // 单例
+let instance
 
 export function getProductStore() {
   if (!instance) instance = new ProductStore()
