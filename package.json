@@ -11,6 +11,11 @@
   ],
   "author": "3106961196",
   "license": "MIT",
+  "imports": {
+    "#utils/*": "../../../src/utils/*",
+    "#infrastructure/*": "../../../src/infrastructure/*",
+    "#oicq": "../../../src/modules/oicq/index.js"
+  },
   "dependencies": {
     "yaml": "^2.4.0",
     "moment-timezone": "^0.5.45"
