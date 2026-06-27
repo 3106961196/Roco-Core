@@ -5,8 +5,10 @@ import IconManager from './icon-manager.js'
 import { getBeijingTime, shouldDetectNow, getRoundInfo } from './time-utils.js'
 import { getMerchantConfig, getDetectionConfig } from './config.js'
 import { getProductStore } from './db/product-store.js'
+import { createLogger } from './logger.js'
 
 const LOG_TAG = '洛克王国-远行商人'
+const logger = createLogger(LOG_TAG)
 
 class MerchantCrawler {
   constructor() {
@@ -324,13 +326,24 @@ class MerchantCrawler {
 
       if (data.success && data.productCount > 0) {
         // 写入缓存时剥离icon字段（图标已本地缓存，通过商品名查找）
+        // 保留 expireTimestamp 用于判断商品是否过期
         const cacheData = {
           ...data,
-          products: data.products.map(p => ({ name: p.name, price: p.price, buyLimit: p.buyLimit })),
+          products: data.products.map(p => ({ 
+            name: p.name, 
+            price: p.price, 
+            buyLimit: p.buyLimit,
+            expireTimestamp: p.expireTimestamp,
+          })),
           historyGroups: data.historyGroups.map(g => ({
             timeLabel: g.timeLabel,
             statusLabel: g.statusLabel,
-            products: g.products.map(p => ({ name: p.name, price: p.price, buyLimit: p.buyLimit })),
+            products: g.products.map(p => ({ 
+              name: p.name, 
+              price: p.price, 
+              buyLimit: p.buyLimit,
+              expireTimestamp: p.expireTimestamp,
+            })),
           })),
         }
         await this.cache.setToday(cacheData)
@@ -340,23 +353,42 @@ class MerchantCrawler {
           buyLimit: p.buyLimit,
         })))
 
-        // 写入 MongoDB
-        const roundInfo = data.roundInfo
-        await this.productStore.saveProducts(
-          data.products.map(p => ({
+        // 写入 MongoDB，每个商品只存一次，round 表示所属轮次
+        // round: 1-4 表示第1-4轮，5 表示闭店时段商品，0 表示多轮次商品
+        const currentRoundInfo = getRoundInfo()
+        const isClosed = currentRoundInfo.status === 'closed'
+        
+        const productsForDB = data.products.map(p => {
+          // 闭店时段抓取的商品标记为 5
+          if (isClosed) {
+            return {
+              name: p.name,
+              price: p.price,
+              buyLimit: p.buyLimit,
+              round: 5
+            }
+          }
+          
+          // 根据 slotIndices 判断轮次
+          const slotIndices = p.slotIndices || []
+          let round = 0
+          if (slotIndices.length === 1) {
+            round = slotIndices[0]  // 单轮次商品：1-4
+          } else if (slotIndices.length > 1) {
+            round = 0  // 多轮次商品
+          }
+          
+          return {
             name: p.name,
             price: p.price,
             buyLimit: p.buyLimit,
-            status: p.status,
-            expireTimestamp: p.expireTimestamp,
-          })),
-          {
-            date: data.date,
-            round: roundInfo?.current || 0,
-            slotIndex: roundInfo?.currentIndex || 0,
-            timeLabel: roundInfo?.timeLabel || '',
+            round: round
           }
-        )
+        })
+        
+        await this.productStore.saveProducts(productsForDB, {
+          date: data.date,
+        })
       } else {
         await this.cache.setToday(data)
       }
@@ -481,8 +513,8 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
       const expireDate = getBeijingTime(p.expireTimestamp)
       const expireMin = expireDate.hour() * 60 + expireDate.minute()
       
-      // 商品的过期时间落在该轮次的时间范围内 [slotStartMin, slotEndMin)
-      return expireMin >= slotStartMin && expireMin < slotEndMin
+      // 商品的过期时间落在该轮次的时间范围内 [slotStartMin, slotEndMin]
+      return expireMin >= slotStartMin && expireMin <= slotEndMin
     })
 
     if (slotProducts.length === 0 && !isCurrentSlot) continue

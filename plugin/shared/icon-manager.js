@@ -4,10 +4,12 @@ import http from 'http'
 import https from 'https'
 import { PATHS } from './paths.js'
 import { getMerchantConfig } from './config.js'
+import { createLogger } from './logger.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 const ICON_CACHE_DIR = PATHS.ICON_CACHE_DIR
 const MAX_REDIRECTS = 5
+const logger = createLogger()
 
 // 允许下载图标的域名白名单
 const ALLOWED_ICON_DOMAINS = [

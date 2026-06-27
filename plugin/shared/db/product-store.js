@@ -5,7 +5,12 @@ const COLLECTION = 'roco_merchant_products'
  * 商品数据存储 - MongoDB
  *
  * 集合：roco_merchant_products
- * 结构：{ date, round, slotIndex, timeLabel, name, price, buyLimit, status, recordedAt, expireTimestamp }
+ * 结构：{ date, round, name, price, buyLimit }
+ *
+ * round 含义：
+ * - 0: 多轮次商品（跨时段）
+ * - 1-4: 第1-4轮商品
+ * - 5: 闭店时段商品
  */
 class ProductStore {
   constructor() {
@@ -26,9 +31,8 @@ class ProductStore {
       this._collection = db.collection(COLLECTION)
 
       // 创建索引
-      await this._collection.createIndex({ date: 1, name: 1 })
       await this._collection.createIndex({ date: 1, round: 1 })
-      await this._collection.createIndex({ name: 1, recordedAt: -1 })
+      await this._collection.createIndex({ date: 1, name: 1 })
 
       this._initialized = true
       logger.mark(`[${LOG_TAG}] MongoDB 商品存储初始化成功`)
@@ -47,33 +51,37 @@ class ProductStore {
 
   /**
    * 批量保存商品数据
-   * @param {Array} products - 商品列表
-   * @param {object} context - 上下文 { date, round, slotIndex, timeLabel }
+   * @param {Array} products - 商品列表，每个商品包含 { name, price, buyLimit, round }
+   * @param {object} context - 上下文 { date }
    */
   async saveProducts(products, context) {
-    if (!this.isAvailable || !products?.length) return
+    if (!products?.length) return
 
-    const { date, round, slotIndex, timeLabel } = context
-    const now = new Date()
+    // 防御性检查：collection 失效时尝试重新初始化
+    if (!this._collection) {
+      logger.debug(`[${LOG_TAG}] MongoDB collection 失效，尝试重新初始化`)
+      this._initialized = false
+      await this.init()
+      if (!this._collection) {
+        logger.warn(`[${LOG_TAG}] MongoDB 重新初始化失败，跳过存储`)
+        return
+      }
+    }
+
+    const { date } = context
 
     const docs = products.map(p => ({
       date,
-      round,
-      slotIndex,
-      timeLabel,
+      round: p.round || 0,
       name: p.name,
       price: p.price,
       buyLimit: p.buyLimit || '-',
-      status: p.status || 'active',
-      recordedAt: now,
-      expireTimestamp: p.expireTimestamp || 0,
     }))
 
     try {
       await this._collection.insertMany(docs, { ordered: false })
       logger.debug(`[${LOG_TAG}] 保存 ${docs.length} 个商品到 MongoDB`)
     } catch (error) {
-      // 忽略重复键错误（如果存在唯一索引）
       if (error.code !== 11000) {
         logger.error(`[${LOG_TAG}] 保存商品失败: ${error.message}`)
       }
@@ -90,7 +98,7 @@ class ProductStore {
     try {
       return await this._collection
         .find({ date })
-        .sort({ round: 1, slotIndex: 1 })
+        .sort({ round: 1 })
         .toArray()
     } catch (error) {
       logger.error(`[${LOG_TAG}] 查询日期 ${date} 失败: ${error.message}`)
@@ -101,7 +109,7 @@ class ProductStore {
   /**
    * 按日期和轮次查询
    * @param {string} date - YYYY-MM-DD
-   * @param {number} round - 轮次
+   * @param {number} round - 轮次 (0-5)
    */
   async getByDateAndRound(date, round) {
     if (!this.isAvailable) return []
@@ -109,10 +117,9 @@ class ProductStore {
     try {
       return await this._collection
         .find({ date, round })
-        .sort({ slotIndex: 1 })
         .toArray()
     } catch (error) {
-      logger.error(`[${LOG_TAG}] 查询 ${date} 第${round}轮失败: ${error.message}`)
+      logger.error(`[${LOG_TAG}] 查询 ${date} round=${round} 失败: ${error.message}`)
       return []
     }
   }
@@ -128,7 +135,7 @@ class ProductStore {
     try {
       return await this._collection
         .find({ name: { $regex: name, $options: 'i' } })
-        .sort({ recordedAt: -1 })
+        .sort({ date: -1 })
         .limit(limit)
         .toArray()
     } catch (error) {
@@ -153,34 +160,11 @@ class ProductStore {
       return 0
     }
   }
-
-  /**
-   * 获取最近 N 天的商品记录
-   * @param {number} days - 天数
-   */
-  async getRecent(days = 7) {
-    if (!this.isAvailable) return []
-
-    const cutoff = new Date()
-    cutoff.setDate(cutoff.getDate() - days)
-
-    try {
-      return await this._collection
-        .find({ recordedAt: { $gte: cutoff } })
-        .sort({ recordedAt: -1 })
-        .toArray()
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 查询最近记录失败: ${error.message}`)
-      return []
-    }
-  }
 }
 
 // 单例
-let instance = null
+
 export function getProductStore() {
   if (!instance) instance = new ProductStore()
   return instance
 }
-
-export default ProductStore

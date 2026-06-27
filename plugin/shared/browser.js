@@ -1,7 +1,9 @@
 import RendererLoader from '../../../../src/infrastructure/renderer/loader.js'
 import { getBrowserConfig } from './config.js'
+import { createLogger } from './logger.js'
 
 const LOG_TAG = '[RocoCore-Browser]'
+const logger = createLogger()
 
 /**
  * 浏览器管理器 - 复用框架渲染器的浏览器实例

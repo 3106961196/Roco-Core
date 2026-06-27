@@ -2,8 +2,10 @@ import YAML from 'yaml'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { createLogger } from './logger.js'
 
 const LOG_TAG = '洛克王国-远行商人'
+const logger = createLogger()
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)

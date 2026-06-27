@@ -6,8 +6,10 @@ import SubscriptionManager from './shared/subscription-manager.js'
 import { getBeijingTime, getRoundInfo } from './shared/time-utils.js'
 import { getUIConfig, getPushConfig } from './shared/config.js'
 import { getProductStore } from './shared/db/product-store.js'
+import { createLogger } from './shared/logger.js'
 
 const LOG_TAG = '洛克王国-远行商人'
+const logger = createLogger()
 
 // 模块级单例锁：跨实例共享组件（防止 plugin 被多次实例化导致重复执行）
 let _sharedComponents = null

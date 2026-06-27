@@ -1,6 +1,8 @@
 import { getBeijingTime } from './time-utils.js'
+import { createLogger } from './logger.js'
 
 const LOG_TAG = '洛克王国-远行商人'
+const logger = createLogger()
 
 /**
  * 补抓服务 - 0:00-8:00 闭市时段补齐昨日缺失的轮次数据
