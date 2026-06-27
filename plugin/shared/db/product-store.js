@@ -1,5 +1,3 @@
-import { getMongoDb } from '#infrastructure/database/index.js'
-
 const LOG_TAG = '洛克王国-远行商人'
 const COLLECTION = 'roco_merchant_products'
 
@@ -19,7 +17,7 @@ class ProductStore {
     if (this._initialized) return
 
     try {
-      const db = getMongoDb()
+      const db = globalThis.mongodbDb
       if (!db) {
         logger.warn(`[${LOG_TAG}] MongoDB 未初始化，商品数据将仅存储在缓存`)
         return
