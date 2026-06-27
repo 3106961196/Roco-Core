@@ -5,6 +5,7 @@ import PushService from './shared/push-service.js'
 import SubscriptionManager from './shared/subscription-manager.js'
 import { getBeijingTime, getRoundInfo } from './shared/time-utils.js'
 import { getUIConfig, getPushConfig } from './shared/config.js'
+import { getProductStore } from './shared/db/product-store.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 
@@ -39,6 +40,7 @@ export class RocoMerchant extends plugin {
         { reg: '^#?远行商人取消订阅$', fnc: 'unsubscribeMerchant', permission: 'master', log: true },
         { reg: '^#?远行商人订阅列表$', fnc: 'listSubscriptions', permission: 'master', log: true },
         { reg: '^#?远行商人推送测试$', fnc: 'testPush', permission: 'master', log: true },
+        { reg: '^#?远行商人查询\\s*(.+)$', fnc: 'queryProductHistory', log: true },
       ],
     })
   }
@@ -370,6 +372,63 @@ export class RocoMerchant extends plugin {
     } catch (error) {
       logger.error(`[${LOG_TAG}] 推送测试异常: ${error.message}`)
       await this.reply(`推送测试失败: ${error.message}`)
+      return false
+    }
+  }
+
+  // ========== 数据库查询命令 ==========
+
+  async queryProductHistory(e) {
+    try {
+      await this.init()
+      const store = getProductStore()
+      if (!store.isAvailable) {
+        await this.reply('数据库未初始化，无法查询历史记录')
+        return false
+      }
+
+      const name = e.msg.replace(/^#?远行商人查询\s*/, '').trim()
+      if (!name) {
+        await this.reply('请输入商品名\n例：#远行商人查询 火焰果冻')
+        return false
+      }
+
+      const records = await store.getByName(name, 20)
+      if (records.length === 0) {
+        await this.reply(`未找到「${name}」的历史记录`)
+        return false
+      }
+
+      const count = await store.countByName(name)
+      let msg = `「${name}」历史记录\n`
+      msg += `--------------------\n`
+      msg += `共出现 ${count} 次\n\n`
+
+      // 按日期分组展示
+      const grouped = {}
+      for (const r of records) {
+        const date = r.date
+        if (!grouped[date]) grouped[date] = []
+        grouped[date].push(r)
+      }
+
+      const dates = Object.keys(grouped).sort((a, b) => b.localeCompare(a))
+      for (const date of dates.slice(0, 10)) {
+        msg += `【${date}】\n`
+        for (const r of grouped[date]) {
+          msg += `  第${r.round}轮 ${r.timeLabel} | ${r.price}币 限购${r.buyLimit}\n`
+        }
+      }
+
+      if (dates.length > 10) {
+        msg += `\n...还有 ${dates.length - 10} 天记录`
+      }
+
+      await this.reply(msg)
+      return true
+    } catch (error) {
+      logger.error(`[${LOG_TAG}] 查询异常: ${error.message}`)
+      await this.reply(`查询出错: ${error.message}`)
       return false
     }
   }

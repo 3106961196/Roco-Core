@@ -4,6 +4,7 @@ import BrowserManager from './browser.js'
 import IconManager from './icon-manager.js'
 import { getBeijingTime, shouldDetectNow, getRoundInfo } from './time-utils.js'
 import { getMerchantConfig, getDetectionConfig } from './config.js'
+import { getProductStore } from './db/product-store.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 
@@ -16,6 +17,7 @@ class MerchantCrawler {
     this.historyCache = new HistoryCache()
     this.browserManager = new BrowserManager()
     this.iconManager = new IconManager()
+    this.productStore = getProductStore()
 
     this.merchantUrl = merchantConfig.dataSources[0]?.url || ''
     this.detectionInterval = (detectionConfig.intervalSeconds || 60) * 1000
@@ -28,6 +30,7 @@ class MerchantCrawler {
 
   async init() {
     this.iconManager.copyBaseAssets()
+    await this.productStore.init()
   }
 
   get browser() {
@@ -89,6 +92,10 @@ class MerchantCrawler {
         logger.warn(`[${LOG_TAG}] 当前轮次(slot=${currentSlotIndex})无有效商品，共${allProducts.length}个商品被排除: ${excluded.map(p => `${p.name}(slots=${p.slotIndices},status=${p.status})`).join(', ') || '无'}`)
       }
 
+      // 判断是否抓到当前轮次特有商品（slotIndices.length === 1 表示只属于一轮）
+      // 如果所有商品都是跨多时段的，说明页面数据可能未完全加载当前轮次
+      const hasSingleSlotProduct = allProducts.some(p => p.slotIndices?.length === 1)
+
       // 按时段分组构建历史数据
       const historyGroups = buildHistoryGroupsFromSlots(allProducts, rawData.timeInfo)
 
@@ -104,6 +111,7 @@ class MerchantCrawler {
           buyLimit: p.buyLimit || '-',
         })),
         historyGroups,
+        hasSingleSlotProduct,
         fetchedAt: getBeijingTime().format('YYYY-MM-DD HH:mm:ss'),
       }
 
@@ -307,6 +315,13 @@ class MerchantCrawler {
     try {
       const data = await this.crawl()
 
+      // 没有单轮次商品（全是跨时段商品），说明当前轮次数据未加载，判定失败
+      // 调度器会在一分钟后自然重试
+      if (data.success && data.productCount > 0 && !data.hasSingleSlotProduct) {
+        logger.warn(`[${LOG_TAG}] 未抓到当前轮次特有商品，仅抓到跨时段商品，判定抓取失败，等待下次调度`)
+        throw new Error('当前轮次商品未加载完成')
+      }
+
       if (data.success && data.productCount > 0) {
         // 写入缓存时剥离icon字段（图标已本地缓存，通过商品名查找）
         const cacheData = {
@@ -324,6 +339,24 @@ class MerchantCrawler {
           price: p.price,
           buyLimit: p.buyLimit,
         })))
+
+        // 写入 MongoDB
+        const roundInfo = data.roundInfo
+        await this.productStore.saveProducts(
+          data.products.map(p => ({
+            name: p.name,
+            price: p.price,
+            buyLimit: p.buyLimit,
+            status: p.status,
+            expireTimestamp: p.expireTimestamp,
+          })),
+          {
+            date: data.date,
+            round: roundInfo?.current || 0,
+            slotIndex: roundInfo?.currentIndex || 0,
+            timeLabel: roundInfo?.timeLabel || '',
+          }
+        )
       } else {
         await this.cache.setToday(data)
       }
@@ -414,10 +447,7 @@ export default MerchantCrawler
 
 /**
  * 按页面时段信息分组商品
- * 页面上有4个时段(show_1~show_4)，每个商品通过 slotIndices 数组关联到所属时段
- * 一个商品可以属于多个时段（如网兜球在所有时段都有）
- *
- * 已结束时段中：排除同时属于当前时段且仍有效的商品，避免重复显示
+ * 根据商品的 expireTimestamp 判断它在哪一轮过期，避免多轮次商品重复显示
  */
 function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
   const slots = timeInfo?.allSlots || []
@@ -426,14 +456,33 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
   const currentSlotIndex = timeInfo?.currentIndex || -1
   const groups = []
 
+  // 把时间字符串 "HH:MM" 转成分钟数，方便比较
+  const timeToMinutes = (timeStr) => {
+    const [h, m] = timeStr.split(':').map(Number)
+    return h * 60 + m
+  }
+
   for (const slot of slots) {
     const isCurrentSlot = slot.index === currentSlotIndex
     const isEnded = slot.index < currentSlotIndex
     const isUpcoming = slot.index > currentSlotIndex
 
+    const slotStartMin = timeToMinutes(slot.startTime)
+    const slotEndMin = timeToMinutes(slot.endTime)
+
+    // 根据过期时间判断商品属于哪个轮次
     const slotProducts = allProducts.filter(p => {
-      if (!p.slotIndices || !p.slotIndices.includes(slot.index)) return false
-      return true
+      if (!p.expireTimestamp) {
+        // 没有过期时间，回退到 slotIndices
+        return p.slotIndices?.includes(slot.index)
+      }
+      
+      // 把 expireTimestamp 转成北京时间的时分
+      const expireDate = getBeijingTime(p.expireTimestamp)
+      const expireMin = expireDate.hour() * 60 + expireDate.minute()
+      
+      // 商品的过期时间落在该轮次的时间范围内 [slotStartMin, slotEndMin)
+      return expireMin >= slotStartMin && expireMin < slotEndMin
     })
 
     if (slotProducts.length === 0 && !isCurrentSlot) continue
