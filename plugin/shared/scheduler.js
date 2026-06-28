@@ -29,6 +29,7 @@ class MerchantScheduler {
     this.lastDetectionTime = null
     this.internalTimer = null
     this._initialized = false
+    this._lastRoundInfo = null
   }
 
   /**
@@ -45,6 +46,7 @@ class MerchantScheduler {
 
     // 框架重启后：将推送状态同步到当前轮次，防止重启后误推
     if (bootRoundInfo.current > 0) {
+      this._lastRoundInfo = bootRoundInfo
       this.pushService.lastPushedRound = bootRoundInfo.current
       this.pushService.lastPushedDate = getBeijingTime().format('YYYY-MM-DD')
       logger.debug(`[${LOG_TAG}] 重启同步: 第${bootRoundInfo.current}轮，禁止重启推送`)
@@ -136,8 +138,13 @@ class MerchantScheduler {
 
       // 检测新轮次
       if (roundInfo.current !== this.currentRoundIndex) {
+        // 轮次变化瞬间：把上一轮 currentProducts 归档为「已结束」组
+        if (this._lastRoundInfo && this._lastRoundInfo.current > 0 && this.currentRoundIndex > 0) {
+          await this.archivePreviousRound(this._lastRoundInfo)
+        }
         this.currentRoundIndex = roundInfo.current
         this.roundDataFetched = false
+        this._lastRoundInfo = roundInfo
         logger.mark(`[${LOG_TAG}] 第${roundInfo.current}轮 ${roundInfo.timeLabel}`)
       }
 
@@ -189,6 +196,63 @@ class MerchantScheduler {
       await this.pushService.pushToAll(merchantImage, data)
     } catch (error) {
       logger.error(`[${LOG_TAG}] 推送执行异常: ${error.message}`)
+    }
+  }
+
+  /**
+   * 把上一轮 currentProducts 归档为「已结束」组，写回今日 cache
+   *
+   * 触发时机：scheduler.scheduleDetection 检测到轮次变化瞬间
+   * 目的：解决「今日已过时商品」丢失问题 —— 爬取新轮次时，前几轮商品的
+   *       show_N class 已被页面 JS 撤掉，buildHistoryGroupsFromSlots 拿不到，
+   *       通过本方法在轮次切换时把上一轮的 currentProducts 落盘。
+   *
+   * @param {object} prevRoundInfo - 上一轮的 roundInfo（{ timeLabel, current, ... }）
+   * @returns {Promise<{ archived: boolean, reason?: string }>}
+   */
+  async archivePreviousRound(prevRoundInfo) {
+    if (!prevRoundInfo || !prevRoundInfo.timeLabel) {
+      return { archived: false, reason: 'prevRoundInfo 缺少 timeLabel' }
+    }
+
+    try {
+      const data = this.crawler.cache.getToday()
+      if (!data) {
+        return { archived: false, reason: '今日 cache 不存在' }
+      }
+      if (!data.products || data.products.length === 0 || (data.productCount || 0) === 0) {
+        return { archived: false, reason: '当前 cache 中无 currentProducts' }
+      }
+
+      const existingGroups = data.historyGroups || []
+      if (existingGroups.some(g => g.timeLabel === prevRoundInfo.timeLabel)) {
+        return { archived: false, reason: `已存在 timeLabel=${prevRoundInfo.timeLabel} 的组` }
+      }
+
+      const archivedGroup = {
+        timeLabel: prevRoundInfo.timeLabel,
+        statusLabel: '已结束',
+        products: data.products.map(p => ({
+          name: p.name,
+          price: p.price,
+          buyLimit: p.buyLimit,
+        })),
+      }
+
+      const merged = {
+        ...data,
+        historyGroups: [...existingGroups, archivedGroup],
+      }
+
+      const ok = this.crawler.cache.setToday(merged)
+      if (ok) {
+        logger.mark(`[${LOG_TAG}] 归档第${prevRoundInfo.current}轮 (${prevRoundInfo.timeLabel}) ${archivedGroup.products.length} 个商品为已结束组`)
+        return { archived: true }
+      }
+      return { archived: false, reason: 'setToday 返回 false' }
+    } catch (error) {
+      logger.error(`[${LOG_TAG}] 归档上一轮失败: ${error.message}`)
+      return { archived: false, reason: error.message }
     }
   }
 

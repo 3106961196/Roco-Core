@@ -317,6 +317,25 @@ class MerchantCrawler {
     try {
       const data = await this.crawl()
 
+      // 保留上一轮归档的「已结束」组：本次新抓的 historyGroups 不会包含前几轮商品
+      // （页面 DOM 上 show_N class 已被切换），需要从旧 cache 合并
+      try {
+        const existing = this.cache.getToday()
+        if (existing && Array.isArray(existing.historyGroups) && existing.historyGroups.length > 0) {
+          const endedFromCache = existing.historyGroups.filter(g => g.statusLabel === '已结束')
+          if (endedFromCache.length > 0) {
+            const existingLabels = new Set((data.historyGroups || []).map(g => g.timeLabel))
+            const toMerge = endedFromCache.filter(g => g.timeLabel && !existingLabels.has(g.timeLabel))
+            if (toMerge.length > 0) {
+              data.historyGroups = [...toMerge, ...(data.historyGroups || [])]
+              logger.debug(`[${LOG_TAG}] 合并旧 cache 中 ${toMerge.length} 个已结束组`)
+            }
+          }
+        }
+      } catch (e) {
+        // 合并失败不影响主流程
+      }
+
       // 没有单轮次商品（全是跨时段商品），说明当前轮次数据未加载，判定失败
       // 调度器会在一分钟后自然重试
       if (data.success && data.productCount > 0 && !data.hasSingleSlotProduct) {
