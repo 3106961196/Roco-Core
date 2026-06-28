@@ -166,10 +166,11 @@ class MerchantRenderer {
       // 优先从 historyGroups 提取（包含完整时段信息）
       if (yesterdayData.historyGroups && yesterdayData.historyGroups.length > 0) {
         for (const g of yesterdayData.historyGroups) {
+          if (!g.products || g.products.length === 0) continue
           groups.push({
             time: `昨日 ${g.timeLabel || '--:--'}`,
             status: 'ended',
-            products: (g.products || []).map(p => ({
+            products: g.products.map(p => ({
               name: p.name,
               iconUrl: getIconUrl(this.crawler.iconManager, p.name),
             })),

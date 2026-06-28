@@ -1,4 +1,5 @@
 import { getBeijingTime } from './time-utils.js'
+import { getProductStore } from './db/product-store.js'
 import { createLogger } from './logger.js'
 
 const LOG_TAG = '洛克王国-远行商人'
@@ -18,23 +19,47 @@ const logger = createLogger()
  */
 
 const REFRESH_TIMES = ['08:00', '12:00', '16:00', '20:00']
+const EXPECTED_TIME_LABELS = [
+  '08:00-12:00',
+  '12:00-16:00',
+  '16:00-20:00',
+  '20:00-24:00',
+]
 
 /**
- * 判断昨日缓存是否已完整（4 个时段都有）
+ * 判断昨日缓存是否已完整（4 个时段都有非空商品）
+ * 注意：buildHistoryGroupsFromSlots 现在始终保留 4 个 slot（即使空），
+ * 所以这里必须检查每个 slot 都有非空 products，避免被空组骗过
  */
 export function isYesterdayHistoryComplete(yesterdayData) {
   if (!yesterdayData) return false
   const groups = yesterdayData.historyGroups || []
-  if (groups.length < 4) return false
-  return groups.some(g => g.timeLabel === '20:00-24:00' || g.timeLabel === '20:00-23:59')
+  const byLabel = new Map(groups.map(g => [g.timeLabel, g]))
+
+  for (const expected of EXPECTED_TIME_LABELS) {
+    const g = byLabel.get(expected)
+    if (!g || !g.products || g.products.length === 0) {
+      return false
+    }
+  }
+  return true
 }
 
 /**
- * 判定一个商品是否属于「昨日」（基于 expireTimestamp）
+ * 判定一个商品是否属于「昨日」（基于 expireTimestamp 或 slotIndices 兜底）
+ * - 有 expireTimestamp：必须在昨日时间范围 [yesterdayStart, yesterdayEnd] 内
+ * - 无 expireTimestamp：用 slotIndices 兜底（与今日 buildHistoryGroupsFromSlots 一致）
  */
 function isYesterdayProduct(product, yesterdayStart, yesterdayEnd) {
-  if (!product.expireTimestamp || product.expireTimestamp <= 0) return false
-  return product.expireTimestamp >= yesterdayStart && product.expireTimestamp <= yesterdayEnd
+  if (product.expireTimestamp && product.expireTimestamp > 0) {
+    return product.expireTimestamp >= yesterdayStart && product.expireTimestamp <= yesterdayEnd
+  }
+  // 兜底：没有 expireTimestamp 但 slotIndices 标记了昨日的某个 slot
+  // 只要有 slotIndices 就认为是昨日商品（页面 DOM 上此时仍残留昨日的 show_N class）
+  if (product.slotIndices && product.slotIndices.length > 0) {
+    return true
+  }
+  return false
 }
 
 /**
@@ -122,6 +147,34 @@ export async function backfillYesterday({ crawler }) {
         buyLimit: p.buyLimit || '-',
       })),
     })
+  }
+
+  // MongoDB 兜底：当前爬取可能不完整（机器人昨日只跑过部分轮次导致页面残留不全），
+  // 从 MongoDB 补齐缺失 slot 的商品，确保昨日 4 个时段都齐全
+  // 注意：兜底放在 newGroups.length 检查之前，因为 crawl() 抓不到不代表 MongoDB 也没有
+  const yesterdayDateStr = yesterday.format('YYYY-MM-DD')
+  const filledLabels = new Set(newGroups.map(g => g.timeLabel))
+  for (const expected of EXPECTED_TIME_LABELS) {
+    if (filledLabels.has(expected)) continue
+    if (existingLabels.has(expected)) continue
+    try {
+      const slotIdx = EXPECTED_TIME_LABELS.indexOf(expected) + 1
+      const docs = await getProductStore().getByDateAndRound(yesterdayDateStr, slotIdx)
+      if (docs && docs.length > 0) {
+        newGroups.push({
+          timeLabel: expected,
+          statusLabel: '已结束',
+          products: docs.map(d => ({
+            name: d.name,
+            price: d.price,
+            buyLimit: d.buyLimit || '-',
+          })),
+        })
+        logger.mark(`[${LOG_TAG}] MongoDB 兜底补齐 ${expected}：${docs.length} 个商品`)
+      }
+    } catch (e) {
+      logger.debug(`[${LOG_TAG}] MongoDB 兜底 ${expected} 失败: ${e.message}`)
+    }
   }
 
   if (newGroups.length === 0) {

@@ -99,6 +99,8 @@ class MerchantCrawler {
       const hasSingleSlotProduct = allProducts.some(p => p.slotIndices?.length === 1)
 
       // 按时段分组构建历史数据
+      // 注意：必须保留全部 4 个 slot（包括空 slot），否则昨日 cache 只有部分时段，
+      // 渲染时「昨日已过时」会少显示组。
       const historyGroups = buildHistoryGroupsFromSlots(allProducts, rawData.timeInfo)
 
       const parsed = {
@@ -536,7 +538,8 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
       return expireMin >= slotStartMin && expireMin <= slotEndMin
     })
 
-    if (slotProducts.length === 0 && !isCurrentSlot) continue
+    // 保留所有 slot（即使空），让 historyGroups 永远是完整 4 个组。
+    // 渲染侧 renderer.prepareRenderData 内部会按 products.length > 0 过滤空组。
 
     groups.push({
       timeLabel: slot.timeLabel,
