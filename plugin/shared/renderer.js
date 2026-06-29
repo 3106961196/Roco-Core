@@ -79,20 +79,28 @@ class MerchantRenderer {
 
     const currentProductNames = new Set(currentProducts.map(p => p.name))
 
-    // 已结束时段中，排除同时出现在当前轮次的商品（避免重复显示）
-    const todayEnded = (data.historyGroups || [])
-      .filter(g => g.statusLabel === '已结束')
-      .map(g => ({
-        time: g.timeLabel || '--:--',
-        status: 'ended',
-        products: (g.products || [])
-          .filter(p => !currentProductNames.has(p.name))
-          .map(p => ({
-            name: p.name,
-            iconUrl: getIconUrl(this.crawler.iconManager, p.name),
-          })),
-      }))
-      .filter(g => g.products.length > 0)
+    // 取当前轮次之前的「已结束」组（按轮次序号严格递增地纳入）
+    // - 第2轮显示: 第1轮组
+    // - 第3轮显示: 第1+2轮组
+    // - 第4轮显示: 第1+2+3轮组
+    // 第1轮不显示今日已结束组（昨日全天由 _loadYesterdayHistory 单独加载）
+    const todayEnded = []
+    if (currentRound > 1) {
+      for (const g of (data.historyGroups || [])) {
+        if (g.statusLabel !== '已结束') continue
+        // slot.index 与 roundInfo.current 1-based 对齐
+        if (typeof g.slotIndex === 'number' && g.slotIndex >= 1 && g.slotIndex < currentRound) {
+          todayEnded.push({
+            time: g.timeLabel || '--:--',
+            status: 'ended',
+            products: (g.products || []).map(p => ({
+              name: p.name,
+              iconUrl: getIconUrl(this.crawler.iconManager, p.name),
+            })),
+          })
+        }
+      }
+    }
 
     // 第1轮需要额外显示昨日的全部已过期商品
     let yesterdayEnded = []

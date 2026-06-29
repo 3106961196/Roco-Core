@@ -321,13 +321,16 @@ class MerchantCrawler {
 
       // 保留上一轮归档的「已结束」组：本次新抓的 historyGroups 不会包含前几轮商品
       // （页面 DOM 上 show_N class 已被切换），需要从旧 cache 合并
+      // 注意：必须按 slotIndex 去重，timeLabel 会出现重复；同时新抓的空组不应阻止合并
       try {
         const existing = this.cache.getToday()
         if (existing && Array.isArray(existing.historyGroups) && existing.historyGroups.length > 0) {
           const endedFromCache = existing.historyGroups.filter(g => g.statusLabel === '已结束')
           if (endedFromCache.length > 0) {
-            const existingLabels = new Set((data.historyGroups || []).map(g => g.timeLabel))
-            const toMerge = endedFromCache.filter(g => g.timeLabel && !existingLabels.has(g.timeLabel))
+            const existingSlotIndices = new Set((data.historyGroups || []).map(g => g.slotIndex).filter(x => typeof x === 'number'))
+            const toMerge = endedFromCache.filter(g =>
+              typeof g.slotIndex === 'number' && !existingSlotIndices.has(g.slotIndex)
+            )
             if (toMerge.length > 0) {
               data.historyGroups = [...toMerge, ...(data.historyGroups || [])]
               logger.debug(`[${LOG_TAG}] 合并旧 cache 中 ${toMerge.length} 个已结束组`)
@@ -357,11 +360,12 @@ class MerchantCrawler {
             expireTimestamp: p.expireTimestamp,
           })),
           historyGroups: data.historyGroups.map(g => ({
+            slotIndex: g.slotIndex,
             timeLabel: g.timeLabel,
             statusLabel: g.statusLabel,
-            products: g.products.map(p => ({ 
-              name: p.name, 
-              price: p.price, 
+            products: g.products.map(p => ({
+              name: p.name,
+              price: p.price,
               buyLimit: p.buyLimit,
               expireTimestamp: p.expireTimestamp,
             })),
@@ -542,6 +546,7 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
     // 渲染侧 renderer.prepareRenderData 内部会按 products.length > 0 过滤空组。
 
     groups.push({
+      slotIndex: slot.index,
       timeLabel: slot.timeLabel,
       statusLabel: isEnded ? '已结束' : isUpcoming ? '未开始' : '当前',
       products: slotProducts.map(p => ({
