@@ -321,16 +321,27 @@ class MerchantCrawler {
 
       // 保留上一轮归档的「已结束」组：本次新抓的 historyGroups 不会包含前几轮商品
       // （页面 DOM 上 show_N class 已被切换），需要从旧 cache 合并
-      // 注意：必须按 slotIndex 去重，timeLabel 会出现重复；同时新抓的空组不应阻止合并
+      // 注意：必须按 slotIndex 去重；只有新抓取中已有商品的轮次才阻止合并，空轮次不阻止
       try {
         const existing = this.cache.getToday()
         if (existing && Array.isArray(existing.historyGroups) && existing.historyGroups.length > 0) {
-          const endedFromCache = existing.historyGroups.filter(g => g.statusLabel === '已结束')
+          const endedFromCache = existing.historyGroups.filter(g => g.statusLabel === '已结束' && g.products?.length > 0)
           if (endedFromCache.length > 0) {
-            const existingSlotIndices = new Set((data.historyGroups || []).map(g => g.slotIndex).filter(x => typeof x === 'number'))
-            const toMerge = endedFromCache.filter(g =>
-              typeof g.slotIndex === 'number' && !existingSlotIndices.has(g.slotIndex)
+            // 只收集新抓取中「有商品」的轮次 slotIndex，空轮次不阻止旧数据合并
+            const existingSlotIndices = new Set(
+              (data.historyGroups || [])
+                .filter(g => g.products?.length > 0)
+                .map(g => g.slotIndex)
+                .filter(x => typeof x === 'number')
             )
+            const currentRound = getRoundInfo().current || 1
+            const toMerge = endedFromCache
+              .filter(g => typeof g.slotIndex === 'number' && !existingSlotIndices.has(g.slotIndex))
+              .map(g => ({
+                ...g,
+                // 旧 cache 中状态可能还是「当前」，若其轮次已小于当前轮次则标记为已结束
+                statusLabel: g.slotIndex < currentRound ? '已结束' : (g.statusLabel || '已结束'),
+              }))
             if (toMerge.length > 0) {
               data.historyGroups = [...toMerge, ...(data.historyGroups || [])]
               logger.debug(`[${LOG_TAG}] 合并旧 cache 中 ${toMerge.length} 个已结束组`)
