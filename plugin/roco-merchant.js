@@ -8,22 +8,8 @@ import { getUIConfig, getPushConfig } from './shared/config.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 
-// 模块级单例锁：跨实例共享组件（防止 plugin 被多次实例化导致重复执行）
 let _sharedComponents = null
 
-/**
- * 远行商人插件 - 入口
- *
- * 职责：
- * - 解析用户命令 (#远行商人 / 订阅 / 状态 / 强制刷新 等)
- * - 路由到对应的 service / scheduler
- *
- * 不再持有以下细节（已迁出）：
- * - 抓取 / 缓存 → shared/crawler.js
- * - 渲染数据准备 / 图片渲染 → shared/renderer.js
- * - 定时调度 / 补抓 / 推送触发 → shared/scheduler.js
- * - 推送 / 订阅 / 历史 → shared/push-service.js + subscription-manager.js
- */
 export class RocoMerchant extends plugin {
   constructor() {
     super({
