@@ -102,6 +102,7 @@ class MerchantCrawler {
           icon: p.icon || '',   // 保留icon URL用于图标下载，不写入缓存
           price: p.price,
           buyLimit: p.buyLimit || '-',
+          isRecommended: p.isRecommended || false,
         })),
         historyGroups,
         fetchedAt: getBeijingTime().format('YYYY-MM-DD HH:mm:ss'),
@@ -185,6 +186,8 @@ class MerchantCrawler {
             const expireTimestamp = dataTime ? parseInt(dataTime) * 1000 : 0
 
             const isVisible = li.style.display !== 'none'
+            // li 上有 on class 表示强烈推荐购买
+            const isRecommended = li.classList.contains('on')
 
             let status = 'unknown'
             if (timeText === '已结束') status = 'ended'
@@ -207,6 +210,7 @@ class MerchantCrawler {
                 buyLimit,
                 status,
                 isVisible,
+                isRecommended,
                 timeText,
                 expireTimestamp,
                 slotIndices: [],
@@ -311,11 +315,11 @@ class MerchantCrawler {
         // 写入缓存时剥离icon字段（图标已本地缓存，通过商品名查找）
         const cacheData = {
           ...data,
-          products: data.products.map(p => ({ name: p.name, price: p.price, buyLimit: p.buyLimit })),
+          products: data.products.map(p => ({ name: p.name, price: p.price, buyLimit: p.buyLimit, isRecommended: p.isRecommended })),
           historyGroups: data.historyGroups.map(g => ({
             timeLabel: g.timeLabel,
             statusLabel: g.statusLabel,
-            products: g.products.map(p => ({ name: p.name, price: p.price, buyLimit: p.buyLimit })),
+            products: g.products.map(p => ({ name: p.name, price: p.price, buyLimit: p.buyLimit, isRecommended: p.isRecommended })),
           })),
         }
         await this.cache.setToday(cacheData)
@@ -323,6 +327,7 @@ class MerchantCrawler {
           name: p.name,
           price: p.price,
           buyLimit: p.buyLimit,
+          isRecommended: p.isRecommended || false,
         })))
       } else {
         await this.cache.setToday(data)
@@ -447,6 +452,7 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
         price: p.price,
         buyLimit: p.buyLimit,
         status: p.status,
+        isRecommended: p.isRecommended || false,
       })),
     })
   }

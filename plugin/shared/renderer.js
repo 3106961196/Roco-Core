@@ -74,22 +74,21 @@ class MerchantRenderer {
         limit: p.buyLimit || p.limit || '-',
         totalCost,
         totalCostDisplay: totalCost > 0 ? totalCost.toLocaleString() : '-',
+        isRecommended: p.isRecommended || false,
       }
     })
 
-    const currentProductNames = new Set(currentProducts.map(p => p.name))
-
-    // 已结束时段中，排除同时出现在当前轮次的商品（避免重复显示）
+    // 已结束时段如实展示该时段的商品，不做跨时段去重
     const todayEnded = (data.historyGroups || [])
       .filter(g => g.statusLabel === '已结束')
       .map(g => ({
         time: g.timeLabel || '--:--',
         status: 'ended',
         products: (g.products || [])
-          .filter(p => !currentProductNames.has(p.name))
           .map(p => ({
             name: p.name,
             iconUrl: getIconUrl(this.crawler.iconManager, p.name),
+            isRecommended: p.isRecommended || false,
           })),
       }))
       .filter(g => g.products.length > 0)
@@ -172,6 +171,7 @@ class MerchantRenderer {
             products: (g.products || []).map(p => ({
               name: p.name,
               iconUrl: getIconUrl(this.crawler.iconManager, p.name),
+              isRecommended: p.isRecommended || false,
             })),
           })
         }
@@ -187,6 +187,7 @@ class MerchantRenderer {
           products: yesterdayData.products.map(p => ({
             name: p.name,
             iconUrl: getIconUrl(this.crawler.iconManager, p.name),
+            isRecommended: p.isRecommended || false,
           })),
         })
       }

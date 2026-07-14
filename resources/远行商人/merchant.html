@@ -139,7 +139,6 @@ html, body {
   gap: 14px;
 }
 
-/* 总价值展示区 */
 .next-round-chip {
   padding: 10px 18px;
   border-radius: 999px;
@@ -195,6 +194,31 @@ html, body {
   border-radius: 20px;
   background: linear-gradient(135deg, rgba(255,255,255,0.72), rgba(244,236,224,0.88));
   box-shadow: 0 8px 20px rgba(58, 39, 21, 0.06);
+}
+
+.product-card.recommended {
+  border: 2px solid rgba(179, 123, 45, 0.5);
+  background: linear-gradient(135deg, rgba(255,245,220,0.85), rgba(255,230,180,0.7));
+  box-shadow: 0 8px 24px rgba(179, 123, 45, 0.15);
+}
+
+.recommended-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f5a623, #e8913a);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.recommended-badge i {
+  font-size: 14px;
 }
 
 .product-image-container {
@@ -422,6 +446,11 @@ html, body {
   text-align: center;
 }
 
+.history-product.recommended {
+  border: 2px solid rgba(179, 123, 45, 0.45);
+  background: rgba(255, 240, 210, 0.9);
+}
+
 .history-product-image {
   width: 58px;
   height: 58px;
@@ -511,7 +540,7 @@ html, body {
           </div>
         {{ else if currentProducts.length > 0 }}
           {{ each currentProducts }}
-          <div class="product-card">
+          <div class="product-card{{ if $value.isRecommended }} recommended{{ /if }}">
             <div class="product-image-container">
               {{ if $value.iconUrl }}
               <img class="product-image" src="{{ $value.iconUrl }}" alt="{{ $value.name }}" onerror="this.outerHTML='<i class=\'ri-box-3-line product-icon-fallback\'></i>'">
@@ -520,7 +549,7 @@ html, body {
               {{ /if }}
             </div>
             <div class="product-main">
-              <div class="product-name">{{ $value.name }}</div>
+              <div class="product-name">{{ $value.name }}{{ if $value.isRecommended }} <span class="recommended-badge"><i class="ri-thumb-up-fill"></i> 推荐</span>{{ /if }}</div>
               <div class="product-info-row">
                 <div class="price-tag">
                   <img class="coin-icon" src="resources/images/coin.png" alt="金币" onerror="this.outerHTML=''">
@@ -561,7 +590,7 @@ html, body {
             </div>
             <div class="history-products">
               {{ each $value.products }}
-              <div class="history-product">
+              <div class="history-product{{ if $value.isRecommended }} recommended{{ /if }}">
                 {{ if $value.iconUrl }}
                 <img class="history-product-image" src="{{ $value.iconUrl }}" alt="{{ $value.name }}" onerror="this.outerHTML='<div class=\'history-product-icon-fallback\'><i class=\'ri-box-3-line\'></i></div>'">
                 {{ else }}
