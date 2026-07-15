@@ -1,8 +1,8 @@
-import AIStream from '#infrastructure/aistream/aistream.js';
-import PluginsLoader from '#infrastructure/plugins/loader.js';
-import BotUtil from '#utils/botutil.js';
-import { EventNormalizer } from '#utils/event-normalizer.js';
-import { actionAck } from '#utils/chat-user-visible-ack.js';
+import AIStream from '../../../src/infrastructure/aistream/aistream.js';
+import PluginsLoader from '../../../src/infrastructure/plugins/loader.js';
+import BotUtil from '../../../src/utils/botutil.js';
+import { EventNormalizer } from '../../../src/utils/event-normalizer.js';
+import { actionAck } from '../../../src/utils/chat-user-visible-ack.js';
 
 const DEFAULT_COMMAND = '#远行商人';
 

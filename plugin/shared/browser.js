@@ -1,4 +1,4 @@
-import RendererLoader from '#infrastructure/renderer/loader.js'
+import RendererLoader from '../../../../src/infrastructure/renderer/loader.js'
 import { getBrowserConfig } from './config.js'
 
 const LOG_TAG = '[RocoCore-Browser]'
