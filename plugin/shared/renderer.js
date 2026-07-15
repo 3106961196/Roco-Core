@@ -90,7 +90,7 @@ class MerchantRenderer {
     const currentRound = liveRoundInfo.current || 1
 
     const currentProducts = (data.products || []).map(p => {
-      const priceNum = this.crawler.parsePrice(p.price)
+      const priceNum = parsePrice(p.price)
       const limitNum = parseInt(p.buyLimit || p.limit) || 0
       const totalCost = priceNum * limitNum
       return {
