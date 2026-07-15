@@ -47,7 +47,6 @@ class MerchantScheduler {
     if (bootRoundInfo.current > 0) {
       this.pushService.lastPushedRound = bootRoundInfo.current
       this.pushService.lastPushedDate = getBeijingTime().format('YYYY-MM-DD')
-
     }
 
     // 绑定检测成功回调

@@ -31,6 +31,32 @@ function getIconUrl(iconManager, name) {
 }
 
 /**
+ * 解析价格字符串为数值
+ * @param {string} priceStr - 价格字符串（如 "100"、"1.5w"、"2万"）
+ * @returns {number} 解析后的数值，失败返回 0
+ */
+function parsePrice(priceStr) {
+  if (!priceStr || priceStr === '未知') return 0
+
+  let price = String(priceStr).trim()
+
+  if (price.includes('w') || price.includes('W')) {
+    return parseFloat(price.replace(/[wW]/, '')) * 10000
+  }
+
+  if (price.includes('万')) {
+    return parseFloat(price.replace(/万/, '')) * 10000
+  }
+
+  const num = parseFloat(price)
+  if (isNaN(num)) {
+    logger.warn(`[${LOG_TAG}] 价格解析失败: "${priceStr}"，默认为0`)
+    return 0
+  }
+  return num
+}
+
+/**
  * 渲染器 - 准备渲染数据并产出图片
  *
  * 依赖：
@@ -45,6 +71,7 @@ class MerchantRenderer {
    */
   constructor({ crawler }) {
     this.crawler = crawler
+    this._ensureLoaded = false
   }
 
   /**
@@ -200,11 +227,25 @@ class MerchantRenderer {
   }
 
   /**
+   * 确保框架渲染器已加载（插件侧防重入，不修改框架代码）
+   */
+  async _ensureRendererLoaded() {
+    if (this._ensureLoaded) return
+    this._ensureLoaded = true
+    try {
+      await RendererLoader.ensureLoaded()
+    } catch (e) {
+      this._ensureLoaded = false
+      throw e
+    }
+  }
+
+  /**
    * 使用框架渲染器直接渲染图片
    */
   async renderImage(renderData) {
     try {
-      await RendererLoader.ensureLoaded()
+      await this._ensureRendererLoaded()
       const renderer = RendererLoader.getRenderer()
       if (!renderer) {
         logger.error(`[${LOG_TAG}] 渲染器不可用`)

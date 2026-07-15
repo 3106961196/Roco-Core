@@ -1,3 +1,4 @@
+import PluginBase from '#infrastructure/plugins/plugin-base.js'
 import MerchantCrawler from './shared/crawler.js'
 import MerchantRenderer from './shared/renderer.js'
 import MerchantScheduler from './shared/scheduler.js'
@@ -10,7 +11,7 @@ const LOG_TAG = '洛克王国-远行商人'
 
 let _sharedComponents = null
 
-export class RocoMerchant extends plugin {
+export class RocoMerchant extends PluginBase {
   constructor() {
     super({
       name: '洛克王国-远行商人',

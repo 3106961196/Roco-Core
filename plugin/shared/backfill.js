@@ -118,6 +118,7 @@ export async function backfillYesterday({ crawler }) {
         name: p.name,
         price: p.price,
         buyLimit: p.buyLimit || '-',
+        isRecommended: p.isRecommended || false,
       })),
     })
   }

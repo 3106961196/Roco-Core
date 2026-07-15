@@ -2,28 +2,29 @@ import MerchantCache from './cache/merchant-cache.js'
 import HistoryCache from './cache/history-cache.js'
 import BrowserManager from './browser.js'
 import IconManager from './icon-manager.js'
-import { getBeijingTime, shouldDetectNow, getRoundInfo } from './time-utils.js'
-import { getMerchantConfig, getDetectionConfig } from './config.js'
+import PageExtractor from './page-extractor.js'
+import Detector from './detector.js'
+import { getBeijingTime, getRoundInfo } from './time-utils.js'
+import { getMerchantConfig } from './config.js'
 
 const LOG_TAG = '洛克王国-远行商人'
 
 class MerchantCrawler {
   constructor() {
-    const detectionConfig = getDetectionConfig()
     const merchantConfig = getMerchantConfig()
 
     this.cache = new MerchantCache()
     this.historyCache = new HistoryCache()
     this.browserManager = new BrowserManager()
     this.iconManager = new IconManager()
+    this.pageExtractor = new PageExtractor()
 
     this.merchantUrl = merchantConfig.dataSources[0]?.url || ''
-    this.detectionInterval = (detectionConfig.intervalSeconds || 60) * 1000
-    this.maxRetries = detectionConfig.maxRetries || 30
 
-    this.isDetecting = false
-    this.detectionTimer = null
-    this.onDetectionSuccess = null
+    // 检测器 - 负责定时检测逻辑
+    this.detector = new Detector({
+      fetchData: (force) => this.getData(force),
+    })
   }
 
   async init() {
@@ -32,6 +33,14 @@ class MerchantCrawler {
 
   get browser() {
     return this.browserManager.browser
+  }
+
+  get isDetecting() {
+    return this.detector.isDetecting
+  }
+
+  set onDetectionSuccess(callback) {
+    this.detector.onDetectionSuccess = callback
   }
 
   async crawl() {
@@ -61,7 +70,6 @@ class MerchantCrawler {
       // 等待商品列表渲染完成
       try {
         await page.waitForSelector('.shop-list li.all_show', { timeout: 15000 })
-        // 等待商品名称渲染
         await page.waitForSelector('.shop-list li.all_show .sp-text p em', { timeout: 5000 })
       } catch (e) {
         logger.warn(`[${LOG_TAG}] 等待商品列表超时，尝试继续提取`)
@@ -70,11 +78,11 @@ class MerchantCrawler {
       // 额外等待确保JS执行完毕
       await new Promise(r => setTimeout(r, 1000))
 
-      const rawData = await this.extractDataFromPage(page)
+      // 使用 PageExtractor 提取数据
+      const rawData = await this.pageExtractor.extract(page)
 
       const allProducts = rawData.products || []
       const roundInfo = getRoundInfo()
-      const currentSlot = rawData.timeInfo?.currentSlot || '--'
       const currentSlotIndex = rawData.timeInfo?.currentIndex || -1
 
       // 基于时间的智能判定：当前轮次商品 = 属于当前 slot 且尚未过期
@@ -99,7 +107,7 @@ class MerchantCrawler {
         productCount: currentProducts.length,
         products: currentProducts.map(p => ({
           name: p.name,
-          icon: p.icon || '',   // 保留icon URL用于图标下载，不写入缓存
+          icon: p.icon || '',
           price: p.price,
           buyLimit: p.buyLimit || '-',
           isRecommended: p.isRecommended || false,
@@ -108,19 +116,7 @@ class MerchantCrawler {
         fetchedAt: getBeijingTime().format('YYYY-MM-DD HH:mm:ss'),
       }
 
-      if (parsed.products.length > 0) {
-        // 先检查缺失图标，再批量下载
-        const missingIcons = parsed.products.filter(p => p.name && !this.iconManager.hasIcon(p.name))
-        if (missingIcons.length > 0) {
-          logger.debug(`[${LOG_TAG}] 图标缺失: ${missingIcons.length} 个，开始下载`)
-        }
-        await this.iconManager.batchDownloadIcons(parsed.products, 3)
-        // 下载后再次检查，记录结果
-        const stillMissing = parsed.products.filter(p => p.name && !this.iconManager.hasIcon(p.name))
-        if (stillMissing.length > 0) {
-          logger.warn(`[${LOG_TAG}] 图标下载失败: ${stillMissing.map(p => p.name).join('、')}`)
-        }
-      }
+      // 图标下载由 renderer.ensureIcons 负责，此处不再处理
 
       return parsed
 
@@ -132,172 +128,6 @@ class MerchantCrawler {
         try { await page.close() } catch (e) { /* ignore */ }
       }
     }
-  }
-
-  async extractDataFromPage(page) {
-    try {
-      const data = await page.evaluate(() => {
-        const result = {
-          products: [],
-          timeInfo: {},
-          debug: {},
-        }
-
-        const allLis = document.querySelectorAll('.shop-list li.all_show')
-        result.debug.totalLis = allLis.length
-
-        allLis.forEach((li) => {
-          try {
-            if (li.classList.contains('show_none_tip')) return
-
-            // 多种选择器尝试获取商品名
-            let nameEl = li.querySelector('.sp-text p em.shop_name')
-              || li.querySelector('.sp-text p em')
-              || li.querySelector('.sp-text em')
-              || li.querySelector('em.shop_name')
-
-            const priceEl = li.querySelector('.sp-text div em') || li.querySelector('.sp-text em.shop_price')
-            const limitEl = li.querySelector('.gitem em')
-            const timeEl = li.querySelector('.datetime_show em')
-
-            // 多种方式获取图标URL
-            const imgEl = li.querySelector('.gitem img') || li.querySelector('img')
-            let iconUrl = imgEl?.src || imgEl?.getAttribute('data-src') || ''
-            if (!iconUrl) {
-              const bgImg = li.querySelector('[style*="background-image"]')
-              if (bgImg) {
-                const bgMatch = bgImg.style.backgroundImage?.match(/url\(["']?(.+?)["']?\)/)
-                if (bgMatch) iconUrl = bgMatch[1]
-              }
-            }
-            // 从onclick属性提取图标URL作为后备
-            if (!iconUrl && li.getAttribute('onclick')) {
-              const onclickMatch = li.getAttribute('onclick').match(/showShopinfo\(['"]([^'"]+)['"]/)
-              if (onclickMatch) iconUrl = onclickMatch[1]
-            }
-
-            const name = nameEl?.textContent?.trim() || ''
-            const priceText = priceEl?.textContent?.trim() || ''
-            const limitText = limitEl?.textContent?.trim() || ''
-            const timeText = timeEl?.textContent?.trim() || ''
-
-            // data-time: 商品到期 Unix 时间戳（秒），由服务端渲染到 li 属性上
-            const dataTime = li.getAttribute('data-time')
-            const expireTimestamp = dataTime ? parseInt(dataTime) * 1000 : 0
-
-            const isVisible = li.style.display !== 'none'
-            // li 上有 on class 表示强烈推荐购买
-            const isRecommended = li.classList.contains('on')
-
-            let status = 'unknown'
-            if (timeText === '已结束') status = 'ended'
-            else if (timeText.match(/^\d{2}:\d{2}:\d{2}$/)) status = 'active'
-            // 基于 data-time 的精确判定：已过期则为 ended
-            if (expireTimestamp > 0 && Date.now() >= expireTimestamp) status = 'ended'
-
-            let price = priceText.replace('价格：', '').replace(' ', '').trim()
-            if (price && !price.match(/^\d/)) price = '未知'
-
-            let buyLimit = '-'
-            const limitMatch = limitText.match(/(\d+)/)
-            if (limitMatch) buyLimit = limitMatch[1]
-
-            if (name && name.length >= 2 && name.length <= 50) {
-              const product = {
-                name,
-                price: price || '未知',
-                icon: iconUrl,
-                buyLimit,
-                status,
-                isVisible,
-                isRecommended,
-                timeText,
-                expireTimestamp,
-                slotIndices: [],
-              }
-
-              // 收集所有 show_N class，一个商品可能属于多个时段
-              for (const cls of li.classList) {
-                const match = cls.match(/^show_(\d+)$/)
-                if (match) {
-                  product.slotIndices.push(parseInt(match[1]))
-                }
-              }
-
-              result.products.push(product)
-            }
-          } catch (e) {
-            // 单个商品解析失败不影响整体
-          }
-        })
-
-        const timeListItems = document.querySelectorAll('.time-list li')
-        const timeSlots = []
-        let currentIndex = -1
-
-        timeListItems.forEach((item, idx) => {
-          const ems = item.querySelectorAll('em')
-          if (ems.length >= 2) {
-            const startTime = ems[0].textContent.trim()
-            const endTime = ems[1].textContent.trim()
-            timeSlots.push({
-              index: idx + 1,  // 1-based，与 show_N class 对齐
-              timeLabel: `${startTime}-${endTime}`,
-              startTime,
-              endTime,
-              isActive: item.classList.contains('on'),
-            })
-
-            if (item.classList.contains('on')) {
-              currentIndex = idx + 1  // 同样1-based
-            }
-          }
-        })
-
-        result.timeInfo = {
-          currentSlot: timeSlots.find(s => s.isActive)?.timeLabel || '--',
-          currentIndex,
-          allSlots: timeSlots,
-        }
-
-        // 提取服务端时间基准（页面用 serverNow 变量驱动倒计时）
-        if (typeof window.serverNow === 'number') {
-          result.timeInfo.serverNow = window.serverNow
-        }
-
-        return result
-      })
-
-      logger.mark(`[${LOG_TAG}] 提取到 ${data.products.length} 个商品 (DOM元素: ${data.debug?.totalLis || 0})，当前时段: ${data.timeInfo?.currentIndex || '?'}，服务端时间: ${data.timeInfo?.serverNow || 'N/A'}`)
-      if (data.products.length === 0 && data.debug?.totalLis > 0) {
-        logger.warn(`[${LOG_TAG}] DOM有${data.debug.totalLis}个商品元素但提取0个，可能选择器不匹配`)
-      }
-      return data
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 数据提取错误: ${error.message}`)
-      return { products: [], timeInfo: {} }
-    }
-  }
-
-  parsePrice(priceStr) {
-    if (!priceStr || priceStr === '未知') return 0
-
-    let price = String(priceStr).trim()
-
-    if (price.includes('w') || price.includes('W')) {
-      return parseFloat(price.replace(/[wW]/, '')) * 10000
-    }
-
-    if (price.includes('万')) {
-      return parseFloat(price.replace(/万/, '')) * 10000
-    }
-
-    const num = parseFloat(price)
-    if (isNaN(num)) {
-      logger.warn(`[${LOG_TAG}] 价格解析失败: "${priceStr}"，默认为0`)
-      return 0
-    }
-    return num
   }
 
   async getData(forceRefresh = false) {
@@ -351,66 +181,16 @@ class MerchantCrawler {
     }
   }
 
-  async startDetection() {
-    if (this.isDetecting) return
-
-    this.isDetecting = true
-    let retryCount = 0
-
-    const detect = async () => {
-      if (!shouldDetectNow()) {
-        this.stopDetection()
-        return
-      }
-
-      retryCount++
-
-      try {
-        const data = await this.getData(true)
-
-        if (data.success && data.productCount > 0) {
-          logger.mark(`[${LOG_TAG}] 检测成功 ${data.productCount} 个商品`)
-          this.stopDetection()
-          // 通知外部检测成功
-          if (typeof this.onDetectionSuccess === 'function') {
-            this.onDetectionSuccess(data).catch(err => {
-              logger.error(`[${LOG_TAG}] 检测成功回调异常: ${err.message}`)
-            })
-          }
-          return
-        }
-
-        if (retryCount >= this.maxRetries) {
-          this.stopDetection()
-          return
-        }
-
-        this.detectionTimer = setTimeout(detect, this.detectionInterval)
-      } catch (error) {
-        logger.error(`[${LOG_TAG}] 检测异常: ${error.message}`)
-
-        if (retryCount < this.maxRetries) {
-          this.detectionTimer = setTimeout(detect, this.detectionInterval)
-        } else {
-          this.stopDetection()
-        }
-      }
-    }
-
-    detect()
+  startDetection() {
+    this.detector.start()
   }
 
   stopDetection() {
-    this.isDetecting = false
-
-    if (this.detectionTimer) {
-      clearTimeout(this.detectionTimer)
-      this.detectionTimer = null
-    }
+    this.detector.stop()
   }
 
   async destroy() {
-    this.stopDetection()
+    this.detector.destroy()
     await this.browserManager.close()
   }
 }
