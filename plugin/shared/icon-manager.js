@@ -2,8 +2,12 @@ import fs from 'fs'
 import path from 'path'
 import http from 'http'
 import https from 'https'
+import { fileURLToPath } from 'url'
 import { PATHS } from './paths.js'
 import { getMerchantConfig } from './config.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 const LOG_TAG = '洛克王国-远行商人'
 const ICON_CACHE_DIR = PATHS.ICON_CACHE_DIR

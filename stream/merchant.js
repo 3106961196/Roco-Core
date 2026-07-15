@@ -1,6 +1,5 @@
 import AiWorkflow from '#infrastructure/ai-workflow/ai-workflow.js';
 import PluginsLoader from '#infrastructure/plugins/loader.js';
-import BotUtil from '#utils/botutil.js';
 import { EventNormalizer } from '#utils/event-normalizer.js';
 import { actionAck } from '#utils/chat-user-visible-ack.js';
 
@@ -53,7 +52,7 @@ function createCommandEventFromSession(e, command) {
     reply: typeof e?.reply === 'function'
       ? async (replyMsg) => e.reply(replyMsg)
       : async (replyMsg) => {
-          BotUtil.makeLog('info', `[merchant] 插件回复：${JSON.stringify(replyMsg)}`, 'MerchantStream');
+          logger.info(`[merchant] 插件回复：${JSON.stringify(replyMsg)}`);
           return { message_id: `ai_cmd_${Date.now()}`, time };
         },
   };
