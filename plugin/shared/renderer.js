@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'path'
-import RendererLoader from '../../../../src/infrastructure/renderer/loader.js'
+import RendererLoader from '#infrastructure/renderer/loader.js'
 import { PATHS } from './paths.js'
 import { getBeijingTime, getRoundInfo } from './time-utils.js'
 import { getUIConfig } from './config.js'
