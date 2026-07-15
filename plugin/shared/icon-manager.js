@@ -258,14 +258,16 @@ class IconManager {
    * 复制基础资源（bg.jpg / coin.png / yuanxingshangren.png）到 merchant 缓存目录
    * 渲染时通过 resPrefix 引用本地副本，避免模板里写绝对路径
    *
-   * 来源目录由配置 merchant.assets.sourceDir 指定；留空则跳过。
+   * 默认使用插件内资源目录，也可通过配置 merchant.assets.sourceDir 指定。
    * 目标目录：data/Roco-data/cache/merchant/
    */
   copyBaseAssets() {
     const merchantConfig = getMerchantConfig() || {}
-    const sourceDir = merchantConfig.assets?.sourceDir
-    if (!sourceDir || !fs.existsSync(sourceDir)) {
-      logger.debug(`[${LOG_TAG}] 跳过基础资源复制: 未配置 sourceDir 或目录不存在`)
+    // 默认资源目录：core/Roco-Core/resources/远行商人/resources/images/
+    const defaultSourceDir = path.join(__dirname, '../../resources/远行商人/resources/images')
+    const sourceDir = merchantConfig.assets?.sourceDir || defaultSourceDir
+    if (!fs.existsSync(sourceDir)) {
+      logger.debug(`[${LOG_TAG}] 跳过基础资源复制: 目录不存在 ${sourceDir}`)
       return false
     }
 

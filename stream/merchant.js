@@ -1,4 +1,4 @@
-import AIStream from '#infrastructure/aistream/aistream.js';
+import AiWorkflow from '#infrastructure/ai-workflow/ai-workflow.js';
 import PluginsLoader from '#infrastructure/plugins/loader.js';
 import BotUtil from '#utils/botutil.js';
 import { EventNormalizer } from '#utils/event-normalizer.js';
@@ -70,7 +70,7 @@ function createCommandEventFromSession(e, command) {
 /**
  * 远行商人触发工作流 — 供 AI 助手 mergeStreams 合并
  */
-export default class MerchantStream extends AIStream {
+export default class MerchantStream extends AiWorkflow {
   constructor() {
     super({
       name: 'merchant',
