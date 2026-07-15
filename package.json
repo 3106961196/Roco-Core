@@ -12,14 +12,14 @@
   "author": "3106961196",
   "license": "MIT",
   "imports": {
-    "#utils/*": "../../../src/utils/*",
-    "#core/*": "../../../*",
-    "#config/*": "../../../config/*",
-    "#data/*": "../../../data/*",
-    "#renderers/*": "../../../src/renderers/*",
-    "#modules/*": "../../../src/modules/*",
-    "#infrastructure/*": "../../../src/infrastructure/*",
-    "#factory/*": "../../../src/factory/*"
+    "#utils/*": "../../src/utils/*",
+    "#core/*": "../../*",
+    "#config/*": "../../config/*",
+    "#data/*": "../../data/*",
+    "#renderers/*": "../../src/renderers/*",
+    "#modules/*": "../../src/modules/*",
+    "#infrastructure/*": "../../src/infrastructure/*",
+    "#factory/*": "../../src/factory/*"
   },
   "dependencies": {
     "yaml": "^2.4.0",
