@@ -1,4 +1,4 @@
-import PluginBase from '../../../../src/infrastructure/plugins/plugin-base.js'
+import PluginBase from '#infrastructure/plugins/plugin-base.js'
 import MerchantCrawler from './shared/crawler.js'
 import MerchantRenderer from './shared/renderer.js'
 import MerchantScheduler from './shared/scheduler.js'
