@@ -1,4 +1,5 @@
 import PluginBase from '#infrastructure/plugins/plugin-base.js'
+import { msgSegment } from '#utils/msg-segment.js'
 import MerchantCrawler from './shared/crawler.js'
 import MerchantRenderer from './shared/renderer.js'
 import MerchantScheduler from './shared/scheduler.js'
@@ -87,7 +88,7 @@ export class RocoMerchant extends PluginBase {
         const renderData = this.renderer.prepareClosedData(roundInfo)
         const result = await this.renderer.renderImage(renderData)
         if (result) {
-          await this.reply(segment.image(result))
+          await this.reply(msgSegment.image(result))
         } else {
           await this.reply(`今日已闭市\n下一轮：${roundInfo.countdown}`)
         }
@@ -116,7 +117,7 @@ export class RocoMerchant extends PluginBase {
       const renderData = this.renderer.prepareRenderData(data)
       const result = await this.renderer.renderImage(renderData)
       if (result) {
-        await this.reply(segment.image(result))
+        await this.reply(msgSegment.image(result))
         return true
       } else {
         await this.reply('图片生成失败，请稍后重试')
@@ -211,7 +212,7 @@ export class RocoMerchant extends PluginBase {
         const renderData = this.renderer.prepareRenderData(data)
         const result = await this.renderer.renderImage(renderData)
         if (result) {
-          await this.reply(segment.image(result))
+          await this.reply(msgSegment.image(result))
           return true
         }
       }
