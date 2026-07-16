@@ -166,6 +166,9 @@ class MerchantScheduler {
    * 流程: 检查图标 → 补全图标 → 渲染图片 → 推送
    */
   async onDetectionSuccess(data) {
+    // 标记本轮数据已获取，防止调度器重复触发检测
+    this.roundDataFetched = true
+
     // 闭市时段禁止推送
     const roundInfo = data?.roundInfo
     if (!roundInfo || roundInfo.status === 'closed') return

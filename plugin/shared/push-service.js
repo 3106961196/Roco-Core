@@ -197,11 +197,11 @@ class PushService {
     if (this._cachedBot && (this._cachedBot.sendMsg || this._cachedBot.pickGroup || this._cachedBot.tasker)) {
       return this._cachedBot
     }
-    const uinList = Bot.uin
+    const uinList = globalThis.Bot?.uin
     if (!uinList) throw new Error('Bot.uin 不可用，请确认框架已启动 Bot')
     for (const id of uinList) {
       if (id === 'stdin') continue
-      const b = Bot[id]
+      const b = globalThis.Bot[id]
       if (b && (b.sendMsg || b.pickGroup || b.pickFriend || b.tasker)) {
         this._cachedBot = b
         return b
