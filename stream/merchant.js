@@ -11,7 +11,7 @@ const DEFAULT_COMMAND = '#远行商人';
  * @param {string} command - 指令正文（如 #远行商人）
  */
 function createCommandEventFromSession(e, command) {
-  const selfId = String(e?.self_id ?? e?.bot?.self_id ?? Bot.uin?.[0] ?? '').trim();
+  const selfId = String(e?.self_id ?? e?.bot?.self_id ?? globalThis.Bot?.uin?.[0] ?? '').trim();
   const userId = String(e?.user_id ?? e?.sender?.user_id ?? '').trim();
   if (!selfId) throw new Error('无法解析机器人 QQ（self_id）');
   if (!userId) throw new Error('无法解析当前发言者 QQ（user_id）');
