@@ -191,23 +191,58 @@ class PushService {
 
   /**
    * 解析一个可用的 Bot 实例（一次性，整个推送批次复用）
-   * Bot.uin 可能是 Set/Array/Map，按可迭代对象遍历
+   * 框架使用 AgentRuntime，通过 AgentRuntime.uin 和 AgentRuntime.bots 获取实例
    */
   _resolveBot() {
     if (this._cachedBot && (this._cachedBot.sendMsg || this._cachedBot.pickGroup || this._cachedBot.tasker)) {
       return this._cachedBot
     }
-    const uinList = globalThis.Bot?.uin
-    if (!uinList) throw new Error('Bot.uin 不可用，请确认框架已启动 Bot')
-    for (const id of uinList) {
-      if (id === 'stdin') continue
-      const b = globalThis.Bot[id]
-      if (b && (b.sendMsg || b.pickGroup || b.pickFriend || b.tasker)) {
-        this._cachedBot = b
-        return b
+    
+    // 优先尝试 AgentRuntime（框架标准方式）
+    const runtime = globalThis.AgentRuntime
+    if (runtime) {
+      // 方式1：通过 AgentRuntime.uin 数组获取
+      const uinList = runtime.uin
+      if (Array.isArray(uinList) && uinList.length > 0) {
+        for (const uin of uinList) {
+          if (uin === 'stdin') continue
+          const b = runtime.bots?.[uin]
+          if (b && (b.sendMsg || b.pickGroup || b.pickFriend || b.tasker)) {
+            this._cachedBot = b
+            return b
+          }
+        }
+      }
+      
+      // 方式2：直接遍历 AgentRuntime.bots
+      if (runtime.bots && typeof runtime.bots === 'object') {
+        for (const [uin, b] of Object.entries(runtime.bots)) {
+          if (uin === 'stdin' || uin === 'port' || uin === 'apiKey') continue
+          if (b && (b.sendMsg || b.pickGroup || b.pickFriend || b.tasker)) {
+            this._cachedBot = b
+            return b
+          }
+        }
       }
     }
-    throw new Error('找不到可用的 Bot 实例')
+    
+    // 兜底：尝试 Bot（兼容旧版本）
+    const botGlobal = globalThis.Bot
+    if (botGlobal) {
+      const uinList = botGlobal.uin
+      if (uinList) {
+        for (const id of uinList) {
+          if (id === 'stdin') continue
+          const b = botGlobal[id]
+          if (b && (b.sendMsg || b.pickGroup || b.pickFriend || b.tasker)) {
+            this._cachedBot = b
+            return b
+          }
+        }
+      }
+    }
+    
+    throw new Error('找不到可用的 Bot 实例，请确认框架已启动')
   }
 
   /**
