@@ -87,15 +87,25 @@ class MerchantCrawler {
       const currentSlotIndex = rawData.timeInfo?.currentIndex || -1
 
       // 基于 expireTimestamp 判定商品归属轮次：在哪一轮过期就属于哪一轮
-      // 当前轮次商品 = 属于当前轮次 且 尚未过期 且 在今天过期
+      // 当前轮次商品 = 属于当前轮次 且 尚未过期
+      // 第4轮特殊：20:00-00:00，00:00过期的商品日期是明天，但也属于今天的第4轮
       const todayDate = getBeijingTime().format('YYYY-MM-DD')
       const currentProducts = allProducts.filter(p => {
         if (!p.expireTimestamp) return false
         const expireRound = getRoundByExpireTime(p.expireTimestamp)
         if (expireRound !== roundInfo.current) return false
-        // 跨天商品：只保留今天到期的
+        // 跨天商品过滤：
+        // - 非第4轮：expireTimestamp 日期必须等于今天
+        // - 第4轮：expireTimestamp 可以是今天 或 明天 00:00（第4轮结束时间）
         const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD')
-        if (expireDate !== todayDate) return false
+        const expireHour = moment(p.expireTimestamp).tz('Asia/Shanghai').hour()
+        if (roundInfo.current === 4) {
+          // 第4轮：允许今天任意时间过期，或明天00:00过期
+          const tomorrow = getBeijingTime().add(1, 'day').format('YYYY-MM-DD')
+          if (expireDate !== todayDate && !(expireDate === tomorrow && expireHour === 0)) return false
+        } else {
+          if (expireDate !== todayDate) return false
+        }
         return p.status !== 'ended'
       })
 
@@ -108,7 +118,15 @@ class MerchantCrawler {
       // 调试：输出被排除的商品信息
       if (currentProducts.length === 0 && allProducts.length > 0) {
         const excluded = allProducts.filter(p => !currentProducts.includes(p))
-        logger.warn(`[${LOG_TAG}] 当前轮次${roundInfo.current}无有效商品，共${allProducts.length}个商品被排除: ${excluded.map(p => `${p.name}(expireRound=${getRoundByExpireTime(p.expireTimestamp)},status=${p.status})`).join(', ') || '无'}`)
+        logger.warn(`[${LOG_TAG}] 当前轮次${roundInfo.current}无有效商品，共${allProducts.length}个商品被排除:`)
+        excluded.forEach(p => {
+          const expireRound = getRoundByExpireTime(p.expireTimestamp)
+          const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm')
+          const expireHour = moment(p.expireTimestamp).tz('Asia/Shanghai').hour()
+          const tomorrow = getBeijingTime().add(1, 'day').format('YYYY-MM-DD')
+          const isTomorrowMidnight = expireDate.startsWith(tomorrow) && expireHour === 0
+          logger.warn(`  - ${p.name}: expireRound=${expireRound}, expireDate=${expireDate}, status=${p.status}, isToday=${moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD') === todayDate}, isTomorrowMidnight=${isTomorrowMidnight}`)
+        })
       }
 
       // 调试：输出商品分布
@@ -239,9 +257,15 @@ function buildHistoryGroupsByExpireTime(allProducts, timeInfo) {
       if (!p.expireTimestamp) return false
       const expireRound = getRoundByExpireTime(p.expireTimestamp)
       if (expireRound !== slot.index) return false
-      // 跨天商品：只保留今天到期的
+      // 跨天商品过滤（与 currentProducts 逻辑一致）
       const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD')
-      if (expireDate !== todayDate) return false
+      const expireHour = moment(p.expireTimestamp).tz('Asia/Shanghai').hour()
+      if (slot.index === 4) {
+        const tomorrow = getBeijingTime().add(1, 'day').format('YYYY-MM-DD')
+        if (expireDate !== todayDate && !(expireDate === tomorrow && expireHour === 0)) return false
+      } else {
+        if (expireDate !== todayDate) return false
+      }
       return true
     })
 
