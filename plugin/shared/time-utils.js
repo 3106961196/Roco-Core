@@ -83,6 +83,36 @@ export function formatTimestamp(tsMs) {
   return moment(tsMs).tz(TIMEZONE).format('HH:mm')
 }
 
+/**
+ * 根据 expireTimestamp 判断商品属于哪一轮
+ * expireTimestamp 是商品过期时间（即该轮次结束时间）
+ * 12:00过期 → 第1轮(08:00-12:00), 16:00过期 → 第2轮(12:00-16:00)
+ * 20:00过期 → 第3轮(16:00-20:00), 00:00过期 → 第4轮(20:00-00:00)
+ * @param {number} expireTimestampMs - 过期时间戳（毫秒）
+ * @returns {number} 轮次编号 1-4，0 表示无法判断
+ */
+export function getRoundByExpireTime(expireTimestampMs) {
+  if (!expireTimestampMs) return 0
+  const expireTime = moment(expireTimestampMs).tz(TIMEZONE)
+  const hour = expireTime.hour()
+  const minute = expireTime.minute()
+
+  // expireTimestamp 是轮次结束时间
+  if (hour === 12 && minute === 0) return 1  // 08:00-12:00 第1轮
+  if (hour === 16 && minute === 0) return 2  // 12:00-16:00 第2轮
+  if (hour === 20 && minute === 0) return 3  // 16:00-20:00 第3轮
+  if (hour === 0 && minute === 0) return 4   // 20:00-00:00 第4轮
+
+  // 兜底：根据时间范围判断
+  if (hour >= 0 && hour < 8) return 4   // 闭市时段，归入第4轮
+  if (hour >= 8 && hour < 12) return 1
+  if (hour >= 12 && hour < 16) return 2
+  if (hour >= 16 && hour < 20) return 3
+  if (hour >= 20) return 4
+
+  return 0
+}
+
 export function shouldDetectNow() {
   const info = getRoundInfo()
   return info.status === 'active'

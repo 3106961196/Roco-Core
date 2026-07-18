@@ -4,7 +4,8 @@ import BrowserManager from './browser.js'
 import IconManager from './icon-manager.js'
 import PageExtractor from './page-extractor.js'
 import Detector from './detector.js'
-import { getBeijingTime, getRoundInfo } from './time-utils.js'
+import moment from 'moment-timezone'
+import { getBeijingTime, getRoundInfo, getRoundByExpireTime } from './time-utils.js'
 import { getMerchantConfig } from './config.js'
 
 const LOG_TAG = '洛克王国-远行商人'
@@ -85,32 +86,50 @@ class MerchantCrawler {
       const roundInfo = getRoundInfo()
       const currentSlotIndex = rawData.timeInfo?.currentIndex || -1
 
-      // 基于时间的智能判定：当前轮次商品 = 属于当前 slot 且尚未过期
+      // 基于 expireTimestamp 判定商品归属轮次：在哪一轮过期就属于哪一轮
+      // 当前轮次商品 = 属于当前轮次 且 尚未过期 且 在今天过期
+      const todayDate = getBeijingTime().format('YYYY-MM-DD')
       const currentProducts = allProducts.filter(p => {
-        if (!p.slotIndices || !p.slotIndices.includes(currentSlotIndex)) return false
+        if (!p.expireTimestamp) return false
+        const expireRound = getRoundByExpireTime(p.expireTimestamp)
+        if (expireRound !== roundInfo.current) return false
+        // 跨天商品：只保留今天到期的
+        const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD')
+        if (expireDate !== todayDate) return false
         return p.status !== 'ended'
+      })
+
+      // 统计当前轮次中"本轮到期"的商品数（用于检测判定）
+      const currentRoundExpiringProducts = currentProducts.filter(p => {
+        const expireRound = getRoundByExpireTime(p.expireTimestamp)
+        return expireRound === roundInfo.current
       })
 
       // 调试：输出被排除的商品信息
       if (currentProducts.length === 0 && allProducts.length > 0) {
         const excluded = allProducts.filter(p => !currentProducts.includes(p))
-        logger.warn(`[${LOG_TAG}] 当前轮次(slot=${currentSlotIndex})无有效商品，共${allProducts.length}个商品被排除: ${excluded.map(p => `${p.name}(slots=${p.slotIndices},status=${p.status})`).join(', ') || '无'}`)
+        logger.warn(`[${LOG_TAG}] 当前轮次${roundInfo.current}无有效商品，共${allProducts.length}个商品被排除: ${excluded.map(p => `${p.name}(expireRound=${getRoundByExpireTime(p.expireTimestamp)},status=${p.status})`).join(', ') || '无'}`)
       }
 
-      // 按时段分组构建历史数据
-      const historyGroups = buildHistoryGroupsFromSlots(allProducts, rawData.timeInfo)
+      // 调试：输出商品分布
+      logger.debug(`[${LOG_TAG}] 当前轮次${roundInfo.current}商品(${currentProducts.length}个): ${currentProducts.map(p => `${p.name}(expire=${p.expireTimestamp})`).join(', ') || '无'}`)
+
+      // 按 expireTimestamp 分组构建历史数据（商品只在它过期的那一轮显示）
+      const historyGroups = buildHistoryGroupsByExpireTime(allProducts, rawData.timeInfo)
 
       const parsed = {
         success: true,
         date: getBeijingTime().format('YYYY-MM-DD'),
         roundInfo,
         productCount: currentProducts.length,
+        currentRoundExpiringCount: currentRoundExpiringProducts.length,
         products: currentProducts.map(p => ({
           name: p.name,
           icon: p.icon || '',
           price: p.price,
           buyLimit: p.buyLimit || '-',
           isRecommended: p.isRecommended || false,
+          expireTimestamp: p.expireTimestamp || 0,
         })),
         historyGroups,
         fetchedAt: getBeijingTime().format('YYYY-MM-DD HH:mm:ss'),
@@ -198,17 +217,16 @@ class MerchantCrawler {
 export default MerchantCrawler
 
 /**
- * 按页面时段信息分组商品
- * 页面上有4个时段(show_1~show_4)，每个商品通过 slotIndices 数组关联到所属时段
- * 一个商品可以属于多个时段（如网兜球在所有时段都有）
- *
- * 已结束时段中：排除同时属于当前时段且仍有效的商品，避免重复显示
+ * 按 expireTimestamp 分组商品
+ * 商品在哪一轮过期就只显示在哪一轮，避免多轮次商品在每个时段重复显示
+ * 只包含今天到期的商品，跨天商品不显示在历史区域
  */
-function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
+function buildHistoryGroupsByExpireTime(allProducts, timeInfo) {
   const slots = timeInfo?.allSlots || []
   if (slots.length === 0) return []
 
   const currentSlotIndex = timeInfo?.currentIndex || -1
+  const todayDate = getBeijingTime().format('YYYY-MM-DD')
   const groups = []
 
   for (const slot of slots) {
@@ -216,8 +234,14 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
     const isEnded = slot.index < currentSlotIndex
     const isUpcoming = slot.index > currentSlotIndex
 
+    // 商品归属判定：expireTimestamp 对应的轮次 = slot.index
     const slotProducts = allProducts.filter(p => {
-      if (!p.slotIndices || !p.slotIndices.includes(slot.index)) return false
+      if (!p.expireTimestamp) return false
+      const expireRound = getRoundByExpireTime(p.expireTimestamp)
+      if (expireRound !== slot.index) return false
+      // 跨天商品：只保留今天到期的
+      const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD')
+      if (expireDate !== todayDate) return false
       return true
     })
 
@@ -233,6 +257,7 @@ function buildHistoryGroupsFromSlots(allProducts, timeInfo) {
         buyLimit: p.buyLimit,
         status: p.status,
         isRecommended: p.isRecommended || false,
+        expireTimestamp: p.expireTimestamp || 0,
       })),
     })
   }

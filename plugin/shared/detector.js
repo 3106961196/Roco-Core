@@ -66,14 +66,22 @@ class Detector {
     try {
       const data = await this.fetchData(true)
 
-      if (data.success && data.productCount > 0) {
-        logger.mark(`[${LOG_TAG}] 检测成功 ${data.productCount} 个商品`)
+      // 检测成功条件：有在当前轮次到期的商品
+      // 多轮次商品可能跨多天，只有 expireTimestamp 对应当前轮次的才算本轮新商品
+      const hasCurrentRoundProducts = data.currentRoundExpiringCount > 0
+      if (data.success && data.productCount > 0 && hasCurrentRoundProducts) {
+        logger.mark(`[${LOG_TAG}] 检测成功 ${data.productCount} 个商品（本轮到期${data.currentRoundExpiringCount}个）`)
         this.stop()
         // 通知外部检测成功
         if (typeof this.onDetectionSuccess === 'function') {
           await this.onDetectionSuccess(data)
         }
         return
+      }
+
+      // 有商品但没有本轮到期的，不算真正的新轮次数据
+      if (data.success && data.productCount > 0 && !hasCurrentRoundProducts) {
+        logger.debug(`[${LOG_TAG}] 检测到${data.productCount}个商品但无本轮到期商品，继续等待`)
       }
 
       if (this.retryCount >= this.maxRetries) {
