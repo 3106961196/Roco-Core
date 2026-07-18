@@ -87,25 +87,11 @@ class MerchantCrawler {
       const currentSlotIndex = rawData.timeInfo?.currentIndex || -1
 
       // 基于 expireTimestamp 判定商品归属轮次：在哪一轮过期就属于哪一轮
-      // 当前轮次商品 = 属于当前轮次 且 尚未过期
-      // 第4轮特殊：20:00-00:00，00:00过期的商品日期是明天，但也属于今天的第4轮
-      const todayDate = getBeijingTime().format('YYYY-MM-DD')
+      // 当前轮次商品 = 属于当前轮次 且 尚未过期（不限制过期日期，跨天商品也能买）
       const currentProducts = allProducts.filter(p => {
         if (!p.expireTimestamp) return false
         const expireRound = getRoundByExpireTime(p.expireTimestamp)
         if (expireRound !== roundInfo.current) return false
-        // 跨天商品过滤：
-        // - 非第4轮：expireTimestamp 日期必须等于今天
-        // - 第4轮：expireTimestamp 可以是今天 或 明天 00:00（第4轮结束时间）
-        const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD')
-        const expireHour = moment(p.expireTimestamp).tz('Asia/Shanghai').hour()
-        if (roundInfo.current === 4) {
-          // 第4轮：允许今天任意时间过期，或明天00:00过期
-          const tomorrow = getBeijingTime().add(1, 'day').format('YYYY-MM-DD')
-          if (expireDate !== todayDate && !(expireDate === tomorrow && expireHour === 0)) return false
-        } else {
-          if (expireDate !== todayDate) return false
-        }
         return p.status !== 'ended'
       })
 
