@@ -101,20 +101,6 @@ class MerchantCrawler {
         return expireRound === roundInfo.current
       })
 
-      // 调试：输出被排除的商品信息
-      if (currentProducts.length === 0 && allProducts.length > 0) {
-        const excluded = allProducts.filter(p => !currentProducts.includes(p))
-        logger.warn(`[${LOG_TAG}] 当前轮次${roundInfo.current}无有效商品，共${allProducts.length}个商品被排除:`)
-        excluded.forEach(p => {
-          const expireRound = getRoundByExpireTime(p.expireTimestamp)
-          const expireDate = moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm')
-          const expireHour = moment(p.expireTimestamp).tz('Asia/Shanghai').hour()
-          const tomorrow = getBeijingTime().add(1, 'day').format('YYYY-MM-DD')
-          const isTomorrowMidnight = expireDate.startsWith(tomorrow) && expireHour === 0
-          logger.warn(`  - ${p.name}: expireRound=${expireRound}, expireDate=${expireDate}, status=${p.status}, isToday=${moment(p.expireTimestamp).tz('Asia/Shanghai').format('YYYY-MM-DD') === todayDate}, isTomorrowMidnight=${isTomorrowMidnight}`)
-        })
-      }
-
       // 调试：输出商品分布
       logger.debug(`[${LOG_TAG}] 当前轮次${roundInfo.current}商品(${currentProducts.length}个): ${currentProducts.map(p => `${p.name}(expire=${p.expireTimestamp})`).join(', ') || '无'}`)
 
