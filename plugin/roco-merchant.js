@@ -1,22 +1,48 @@
+/**
+ * 洛克王国 · 远行商人
+ *
+ *   - 定时：PluginBase.task（PUSH_CRON / CACHE_CRON）
+ *   - 抓取：PlaywrightAgentSession + buildBrowserRuntime
+ *   - 渲染：RendererLoader + resources/远行商人/merchant.html
+ *   - 去重 redis / 专属缓存 sqliteKv
+ *   - 配置 CommonConfigRegistry(roco) ← default/roco.yaml → data/Roco-data/roco.yaml
+ */
 import PluginBase from '#infrastructure/plugins/plugin-base.js'
-import { msgSegment } from '#utils/msg-segment.js'
-import MerchantCrawler from './shared/crawler.js'
-import MerchantRenderer from './shared/renderer.js'
-import MerchantScheduler from './shared/scheduler.js'
-import PushService from './shared/push-service.js'
-import SubscriptionManager from './shared/subscription-manager.js'
-import { getBeijingTime, getRoundInfo } from './shared/time-utils.js'
-import { getUIConfig, getPushConfig } from './shared/config.js'
+import RuntimeUtil from '#utils/runtime-util.js'
+import paths from '#utils/paths.js'
+import path from 'node:path'
+import {
+  ensureRocoConfig,
+  isPushEnabled,
+  getMaxSubscriptionsPerTarget,
+  isMerchantEnabled,
+} from './merchant/config.js'
+import {
+  getCurrentSlot,
+  isOvernightSlot,
+  dayKey,
+  fetchMerchantViewData,
+  waitForReadyShelf,
+  cacheTodayExclusiveSlots,
+} from './merchant/crawl.js'
+import { renderMerchantImage, formatTextFallback } from './merchant/view.js'
 
-const LOG_TAG = '洛克王国-远行商人'
+const LOG_TAG = '远行商人'
+const PUSH_CRON = '0 1 8,12,16,20 * * *'
+const CACHE_CRON = '0 58 23 * * *'
+const PUSH_DEDUP_PREFIX = 'AGT:roco-merchant:pushed'
+const SUBS_CACHE = 'roco-merchant-subs'
 
-let _sharedComponents = null
+const nowLabel = () =>
+  new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
 
 export class RocoMerchant extends PluginBase {
+  pushInFlight = false
+
   constructor() {
     super({
       name: '洛克王国-远行商人',
-      dsc: '远行商人商品查询与智能推送',
+      dsc: '远行商人查询与订阅推送',
       event: 'message',
       priority: 5000,
       rule: [
@@ -28,343 +54,263 @@ export class RocoMerchant extends PluginBase {
         { reg: '^#?远行商人订阅列表$', fnc: 'listSubscriptions', permission: 'master', log: true },
         { reg: '^#?远行商人推送测试$', fnc: 'testPush', permission: 'master', log: true },
       ],
+      task: [
+        { name: '远行商人推送', cron: PUSH_CRON, fnc: 'pushScheduled', log: true, timezone: 'Asia/Shanghai' },
+        { name: '远行商人专属缓存', cron: CACHE_CRON, fnc: 'cacheExclusiveDaily', log: true, timezone: 'Asia/Shanghai' },
+      ],
     })
   }
 
-  /**
-   * 初始化：构造 crawler / renderer / scheduler（单例）
-   * 框架首次调用 rule 中的方法前会自动调用 init()
-   */
-  async init() {
-    if (this._initPromise) return this._initPromise
-    this._initPromise = this._doInit()
-    return this._initPromise
+  get subsFile() {
+    return path.join(paths.data, 'Roco-data', 'subscription', 'subscriptions.json')
   }
 
-  async _doInit() {
-    if (_sharedComponents && _sharedComponents._initialized) {
-      logger.debug(`[${LOG_TAG}] 插件已初始化，共享单例组件`)
-      this.bindComponents(_sharedComponents)
+  get subsCache() {
+    return RuntimeUtil.getMap(SUBS_CACHE)
+  }
+
+  async init() {
+    await ensureRocoConfig()
+    if (!isMerchantEnabled()) return
+    await this.loadSubscriptions()
+    RuntimeUtil.makeLog('mark', '插件已启动', LOG_TAG)
+  }
+
+  async queryMerchant() {
+    try {
+      const view = await fetchMerchantViewData()
+      const buf = await renderMerchantImage(view)
+      await this.reply(buf ? msgSegment.image(buf) : formatTextFallback(view))
+      return true
+    } catch (err) {
+      RuntimeUtil.makeLog('error', `查询失败: ${err?.message || err}`, LOG_TAG)
+      await this.reply(`查询出错: ${err?.message || err}`)
+      return false
+    }
+  }
+
+  async forceRefresh() {
+    try {
+      await this.reply('正在强制刷新远行商人数据...')
+      const view = await fetchMerchantViewData()
+      const buf = await renderMerchantImage(view)
+      await this.reply(buf ? msgSegment.image(buf) : formatTextFallback(view))
+      return true
+    } catch (err) {
+      await this.reply(`刷新失败: ${err?.message || err}`)
+      return false
+    }
+  }
+
+  async showStatus() {
+    const slot = getCurrentSlot()
+    const e = this.e
+    const isGroup = !!e?.isGroup
+    const id = isGroup ? String(e.group_id) : String(e.user_id)
+    const sub = this.subsCache.get(`${isGroup ? 'group' : 'private'}:${id}`)
+
+    let msg = [
+      '远行商人订阅状态',
+      '--------------------',
+      `当前时间：${nowLabel()}`,
+      `时段：${slot.label}`,
+      `状态：${isOvernightSlot(slot) ? '闭市' : '开市'}`,
+      `推送：${isPushEnabled() ? '已启用' : '未启用'}`,
+      `订阅数：${this.subsCache.size}`,
+    ].join('\n')
+
+    msg += sub
+      ? `\n\n本${isGroup ? '群' : '你'}：已订阅（${sub.subscribedAt || ''}）`
+      : `\n\n本${isGroup ? '群' : '你'}：未订阅\n发送 #远行商人订阅 即可订阅`
+
+    await this.reply(msg)
+    return true
+  }
+
+  async subscribeMerchant() {
+    if (!isPushEnabled()) {
+      await this.reply('推送功能未启用，请联系管理员开启')
+      return false
+    }
+    const sub = this.buildSubFromEvent()
+    if (!sub) {
+      await this.reply('无法识别目标，请稍后重试')
+      return false
+    }
+    const key = `${sub.type}:${sub.id}`
+    const max = getMaxSubscriptionsPerTarget()
+    if (this.subsCache.has(key) && max <= 1) {
+      await this.reply('该目标已订阅过了')
+      return true
+    }
+    this.subsCache.set(key, sub)
+    await this.saveSubscriptions()
+    await this.reply(`${sub.type === 'group' ? '本群' : '你'}已成功订阅远行商人推送`)
+    return true
+  }
+
+  async unsubscribeMerchant() {
+    const sub = this.buildSubFromEvent()
+    if (!sub) {
+      await this.reply('无法识别目标')
+      return false
+    }
+    const key = `${sub.type}:${sub.id}`
+    if (!this.subsCache.has(key)) {
+      await this.reply('未订阅')
+      return true
+    }
+    this.subsCache.delete(key)
+    await this.saveSubscriptions()
+    await this.reply(`${sub.type === 'group' ? '本群' : '你'}已取消远行商人订阅`)
+    return true
+  }
+
+  async listSubscriptions() {
+    const all = [...this.subsCache.values()]
+    let msg = `远行商人订阅列表\n--------------------\n总计：${all.length}\n\n`
+    if (!all.length) msg += '暂无订阅'
+    else {
+      all.forEach((s, i) => {
+        msg += `${i + 1}. [${s.type === 'group' ? '群' : '私'}] ${s.id} - ${s.subscribedAt || ''}\n`
+      })
+    }
+    await this.reply(msg)
+    return true
+  }
+
+  async testPush() {
+    if (!this.subsCache.size) {
+      await this.reply('暂无订阅者，无法测试推送')
+      return false
+    }
+    await this.reply(`开始推送测试，共 ${this.subsCache.size} 个订阅...`)
+    const result = await this.deliverToSubs(await fetchMerchantViewData())
+    await this.reply(`推送测试完成\n总计: ${result.total}\n成功: ${result.success}\n失败: ${result.failed}`)
+    return true
+  }
+
+  async cacheExclusiveDaily() {
+    if (!isMerchantEnabled()) return
+    try {
+      await cacheTodayExclusiveSlots(new Date())
+    } catch (err) {
+      RuntimeUtil.makeLog('error', `专属缓存失败: ${err?.message || err}`, LOG_TAG)
+    }
+  }
+
+  async pushScheduled() {
+    if (!isMerchantEnabled() || !isPushEnabled()) return
+    if (this.pushInFlight) {
+      RuntimeUtil.makeLog('mark', '上一次推送仍在进行，跳过', LOG_TAG)
+      return
+    }
+    if (!this.subsCache.size) return
+
+    const slot = getCurrentSlot()
+    if (isOvernightSlot(slot)) {
+      RuntimeUtil.makeLog('mark', '当前闭市，跳过推送', LOG_TAG)
+      return
+    }
+    if (await this.hasPushedSlot(slot)) {
+      RuntimeUtil.makeLog('mark', `${slot.label} 今日已推送，跳过`, LOG_TAG)
       return
     }
 
-    const crawler = new MerchantCrawler()
-    const subscriptionManager = new SubscriptionManager()
-    const pushService = new PushService(subscriptionManager)
-    const renderer = new MerchantRenderer({ crawler })
-    const scheduler = new MerchantScheduler({
-      crawler,
-      renderer,
-      subscriptionManager,
-      pushService,
-    })
-
-    this.bindComponents({ crawler, renderer, scheduler, subscriptionManager, pushService })
-    await scheduler.init()
-    _sharedComponents = this.components
-  }
-
-  /**
-   * 把组件绑定到 this 上，方便命令方法访问
-   */
-  bindComponents(components) {
-    this.components = components
-    this.crawler = components.crawler
-    this.renderer = components.renderer
-    this.scheduler = components.scheduler
-    this.subscriptionManager = components.subscriptionManager
-    this.pushService = components.pushService
-  }
-
-  // ========== 用户命令 ==========
-
-  async queryMerchant(e) {
+    this.pushInFlight = true
     try {
-      await this.init()
-      const roundInfo = getRoundInfo()
+      const view = await waitForReadyShelf(slot)
+      if (!view || (await this.hasPushedSlot(slot))) return
+      const result = await this.deliverToSubs(view)
+      if (result.success > 0) await this.markPushedSlot(slot)
+    } catch (err) {
+      RuntimeUtil.makeLog('error', `定时推送失败: ${err?.message || err}`, LOG_TAG)
+    } finally {
+      this.pushInFlight = false
+    }
+  }
 
-      // 0:00-8:00 闭市时段：不爬取，显示昨日已过期商品
-      if (roundInfo.status === 'closed') {
-        const renderData = this.renderer.prepareClosedData(roundInfo)
-        const result = await this.renderer.renderImage(renderData)
-        if (result) {
-          await this.reply(msgSegment.image(result))
-        } else {
-          await this.reply(`今日已闭市\n下一轮：${roundInfo.countdown}`)
-        }
-        return true
-      }
+  async deliverToSubs(view) {
+    const buf = await renderMerchantImage(view)
+    const payload = buf ? msgSegment.image(buf) : formatTextFallback(view)
+    let success = 0
+    let failed = 0
 
-      const data = await this.crawler.getData(false)
-      if (!data || !data.success) {
-        const errorMsg = data?.error || '无法获取数据，请稍后重试'
-        await this.reply(`获取失败: ${errorMsg}`)
-        return false
+    for (const sub of this.subsCache.values()) {
+      try {
+        await this.deliver(sub, payload)
+        success++
+        await RuntimeUtil.sleep(500)
+      } catch (err) {
+        failed++
+        RuntimeUtil.makeLog('error', `推送失败 ${sub.type}(${sub.id}): ${err?.message || err}`, LOG_TAG)
       }
+    }
+    return { total: this.subsCache.size, success, failed }
+  }
 
-      if (data.productCount === 0) {
-        let statusMsg = ''
-        if (roundInfo.status === 'waiting') {
-          statusMsg = `商人即将刷新\n预计时间：${roundInfo.detectionStartTime}`
-        } else {
-          statusMsg = `当前轮次暂无商品\n时段：${roundInfo.timeLabel}\n\n可能原因：\n- 商人尚未刷新商品\n- 网页数据正在更新中`
-        }
-        await this.reply(statusMsg)
-        return true
-      }
+  async deliver(sub, msg) {
+    // botId=null：底层按群/好友归属选 bot（对齐 lkwg）
+    if (sub.type === 'group') {
+      await AgentRuntime.sendGroupMsg(sub.uin || null, sub.id, msg)
+    } else {
+      await AgentRuntime.sendFriendMsg(sub.uin || null, sub.id, msg)
+    }
+  }
 
-      await this.renderer.ensureIcons(data.products)
-      const renderData = this.renderer.prepareRenderData(data)
-      const result = await this.renderer.renderImage(renderData)
-      if (result) {
-        await this.reply(msgSegment.image(result))
-        return true
-      } else {
-        await this.reply('图片生成失败，请稍后重试')
-        return false
-      }
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 查询异常: ${error.message}`)
-      await this.reply(`查询出错: ${error.message}`)
+  pushDedupKey(slot, now = new Date()) {
+    return `${PUSH_DEDUP_PREFIX}:${dayKey(now)}:${slot.key}`
+  }
+
+  async hasPushedSlot(slot, now = new Date()) {
+    if (!globalThis.redis?.isOpen) return false
+    try {
+      return !!(await redis.get(this.pushDedupKey(slot, now)))
+    } catch {
       return false
     }
   }
 
-  async showStatus(e) {
+  async markPushedSlot(slot, now = new Date()) {
+    if (!globalThis.redis?.isOpen) return
     try {
-      await this.init()
-      const roundInfo = getRoundInfo()
-      const cacheStatus = this.crawler.cache.getStatus()
-      const historyStatus = this.crawler.historyCache.getStatus()
-      const pushStatus = this.pushService.getStatus()
-      const pushConfig = getPushConfig()
-
-      const isGroup = e.isGroup
-      const type = isGroup ? 'group' : 'private'
-      const id = isGroup ? e.group_id : e.user_id
-      const sub = id ? this.subscriptionManager.getSubscription(type, String(id)) : null
-
-      let msg = '远行商人订阅状态\n'
-      msg += '--------------------\n'
-      msg += `当前时间：${getBeijingTime().format('YYYY-MM-DD HH:mm:ss')}\n`
-      msg += `轮次：第 ${roundInfo.current}/${roundInfo.total} 轮\n`
-      msg += `时段：${roundInfo.timeLabel}\n`
-      msg += `倒计时：${roundInfo.countdown}\n`
-      msg += `检测状态：${roundInfo.status === 'active' ? '检测中' : roundInfo.status === 'waiting' ? '等待中' : '未开放'}\n`
-
-      if (cacheStatus.today.exists) {
-        msg += `\n今日缓存：${cacheStatus.today.valid ? '有效' : '已过期'}\n`
-        if (cacheStatus.today.productCount !== undefined) {
-          msg += `  商品数：${cacheStatus.today.productCount}件\n`
-          msg += `  缓存时间：${cacheStatus.today.cachedAt}\n`
-          msg += `  缓存时长：${cacheStatus.today.age}\n`
-        }
-      } else {
-        msg += `\n今日缓存：不存在\n`
-      }
-
-      if (historyStatus.exists) {
-        msg += `\n历史记录：存在 (${historyStatus.recordCount || 0}条)\n`
-        msg += `  最后更新：${historyStatus.updatedAt || '--'}\n`
-      } else {
-        msg += `\n历史记录：暂无\n`
-      }
-
-      msg += `\n推送功能：${pushConfig.enabled !== false ? '已启用' : '未启用'}\n`
-      if (pushStatus.enabled) {
-        msg += `  订阅数：${pushStatus.subscriptionStats.total} (群${pushStatus.subscriptionStats.groups} 私${pushStatus.subscriptionStats.private})\n`
-        if (pushStatus.lastPushedRound !== null) {
-          msg += `  上次推送：第${pushStatus.lastPushedRound}轮\n`
-        }
-      }
-
-      if (sub) {
-        msg += `\n本${isGroup ? '群' : '你'}订阅：已订阅\n`
-        msg += `  订阅时间：${sub.subscribedAt}\n`
-        msg += `  下一轮推送将在新时段刷新后自动发送`
-      } else {
-        msg += `\n本${isGroup ? '群' : '你'}订阅：未订阅\n`
-        msg += `  发送 #远行商人订阅 即可订阅推送`
-      }
-
-      await this.reply(msg)
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 状态查询异常: ${error.message}`)
-      await this.reply(`状态查询失败: ${error.message}`)
-      return false
+      await redis.set(this.pushDedupKey(slot, now), '1', { EX: 36 * 3600 })
+    } catch (err) {
+      RuntimeUtil.makeLog('warn', `写入推送去重失败: ${err?.message || err}`, LOG_TAG)
     }
   }
 
-  async forceRefresh(e) {
-    try {
-      await this.init()
-      await this.reply('正在强制刷新远行商人数据...')
-
-      const data = await this.scheduler.forceRefresh()
-      if (!data || !data.success) {
-        await this.reply(`刷新失败: ${data?.error || '未知错误'}`)
-        return false
-      }
-
-      if (data.productCount > 0) {
-        await this.renderer.ensureIcons(data.products)
-        const renderData = this.renderer.prepareRenderData(data)
-        const result = await this.renderer.renderImage(renderData)
-        if (result) {
-          await this.reply(msgSegment.image(result))
-          return true
-        }
-      }
-
-      const names = (data.products || []).map(p => p.name).join('、')
-      await this.reply(`刷新成功！当前售卖：${names || '暂无商品'}`)
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 强制刷新异常: ${error.message}`)
-      await this.reply(`刷新失败: ${error.message}`)
-      return false
+  buildSubFromEvent() {
+    const e = this.e
+    if (!e) return null
+    const isGroup = !!e.group_id
+    const id = isGroup ? String(e.group_id) : String(e.user_id)
+    if (!id || id === 'undefined') return null
+    return {
+      type: isGroup ? 'group' : 'private',
+      id,
+      subscribedBy: String(e.user_id || ''),
+      subscribedAt: nowLabel(),
+      uin: e.self_id ? String(e.self_id) : null,
+      group_id: isGroup ? String(e.group_id) : undefined,
     }
   }
 
-  async subscribeMerchant(e) {
+  async loadSubscriptions() {
     try {
-      await this.init()
-      if (!this.pushService.isEnabled()) {
-        await this.reply('推送功能未启用，请联系管理员开启')
-        return false
+      const data = JSON.parse(await RuntimeUtil.readFile(this.subsFile))
+      for (const sub of data.subscriptions || []) {
+        if (sub?.type && sub?.id) this.subsCache.set(`${sub.type}:${sub.id}`, sub)
       }
-
-      const isGroup = e.isGroup
-      const type = isGroup ? 'group' : 'private'
-      const id = isGroup ? e.group_id : e.user_id
-      if (!id) {
-        await this.reply('无法识别目标，请稍后重试')
-        return false
-      }
-
-      const result = this.subscriptionManager.subscribe({
-        type,
-        id: String(id),
-        subscribedBy: String(e.user_id),
-        group_id: isGroup ? String(e.group_id) : undefined,
-      })
-
-      if (result.ok) {
-        const targetDesc = isGroup ? `本群` : '你'
-        await this.reply(`${targetDesc}已成功订阅远行商人推送\n每轮商人刷新后将自动推送商品信息`)
-      } else {
-        await this.reply(result.msg)
-      }
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 订阅异常: ${error.message}`)
-      await this.reply(`订阅失败: ${error.message}`)
-      return false
-    }
+    } catch { /* 首次启动 */ }
   }
 
-  async unsubscribeMerchant(e) {
-    try {
-      await this.init()
-      const isGroup = e.isGroup
-      const type = isGroup ? 'group' : 'private'
-      const id = isGroup ? e.group_id : e.user_id
-      if (!id) {
-        await this.reply('无法识别目标，请稍后重试')
-        return false
-      }
-
-      const result = this.subscriptionManager.unsubscribe(type, String(id))
-      if (result.ok) {
-        const targetDesc = isGroup ? `本群` : '你'
-        await this.reply(`${targetDesc}已取消远行商人订阅`)
-      } else {
-        await this.reply(result.msg)
-      }
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 取消订阅异常: ${error.message}`)
-      await this.reply(`取消订阅失败: ${error.message}`)
-      return false
-    }
-  }
-
-  async listSubscriptions(e) {
-    try {
-      await this.init()
-      const all = this.subscriptionManager.getAll()
-      const stats = this.subscriptionManager.getStats()
-
-      let msg = `远行商人订阅列表\n`
-      msg += `--------------------\n`
-      msg += `总计：${stats.total} 个订阅 (群${stats.groups} 私${stats.private})\n\n`
-
-      if (all.length === 0) {
-        msg += '暂无订阅'
-      } else {
-        for (let i = 0; i < all.length; i++) {
-          const sub = all[i]
-          const typeLabel = sub.type === 'group' ? '群' : '私'
-          msg += `${i + 1}. [${typeLabel}] ${sub.id} - ${sub.subscribedAt}\n`
-        }
-      }
-
-      await this.reply(msg)
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 列出订阅异常: ${error.message}`)
-      await this.reply(`查询失败: ${error.message}`)
-      return false
-    }
-  }
-
-  async testPush(e) {
-    try {
-      await this.init()
-      if (!this.pushService.isEnabled()) {
-        await this.reply('推送功能未启用')
-        return false
-      }
-
-      const subscriptions = this.subscriptionManager.getAll()
-      if (subscriptions.length === 0) {
-        await this.reply('暂无订阅者，无法测试推送')
-        return false
-      }
-
-      await this.reply(`开始推送测试，共 ${subscriptions.length} 个订阅...`)
-
-      const roundInfo = getRoundInfo()
-      let merchantImage = null
-      if (roundInfo.status !== 'closed') {
-        const data = await this.crawler.getData(false)
-        if (data?.success && data.productCount > 0) {
-          await this.renderer.ensureIcons(data.products)
-          const renderData = this.renderer.prepareRenderData(data)
-          merchantImage = await this.renderer.renderImage(renderData)
-        }
-      }
-
-      this.pushService.resetPushState()
-      const result = await this.pushService.pushToAll(merchantImage, {
-        roundInfo,
-        products: [],
-        success: true,
-      }, { isTest: true })
-
-      await this.reply(`推送测试完成\n总计: ${result.total}\n成功: ${result.success}\n失败: ${result.failed}`)
-      return true
-    } catch (error) {
-      logger.error(`[${LOG_TAG}] 推送测试异常: ${error.message}`)
-      await this.reply(`推送测试失败: ${error.message}`)
-      return false
-    }
-  }
-
-  async destroy() {
-    if (this.scheduler) {
-      await this.scheduler.destroy()
-    }
+  async saveSubscriptions() {
+    await RuntimeUtil.writeFile(this.subsFile, JSON.stringify({
+      subscriptions: [...this.subsCache.values()],
+      updatedAt: new Date().toISOString(),
+    }, null, 2))
   }
 }
+
+export default RocoMerchant

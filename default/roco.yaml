@@ -1,0 +1,7 @@
+# Roco-Core 默认配置（首次 read 复制到 data/Roco-data/roco.yaml）
+enabled: true
+sourceUrl: "https://www.onebiji.com/hykb_tools/comm/lkwgmerchant/preview.php?id=1&immgj=0&imm=1"
+pushEnabled: true
+maxSubscriptionsPerTarget: 1
+imageQuality: 90
+imageFormat: jpeg
