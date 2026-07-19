@@ -28,8 +28,9 @@ export function isPushEnabled() {
   return cfg().pushEnabled
 }
 
-export function getMaxSubscriptionsPerTarget() {
-  return cfg().maxSubscriptionsPerTarget
+/** 配置中的推送 QQ 群号（去空、转字符串） */
+export function getPushGroupIds() {
+  return (cfg().pushGroupIds || []).map(String).map((s) => s.trim()).filter(Boolean)
 }
 
 export function getUIConfig() {

@@ -4,8 +4,8 @@
  *   - 定时：PluginBase.task（PUSH_CRON / CACHE_CRON）
  *   - 抓取：PlaywrightAgentSession + buildBrowserRuntime
  *   - 渲染：RendererLoader + resources/远行商人/merchant.html
- *   - 去重 redis / 专属缓存 sqliteKv
- *   - 配置 CommonConfigRegistry(roco) ← default/roco.yaml → data/Roco-data/roco.yaml
+ *   - 推送目标：配置 pushGroupIds + 指令预约（私聊/额外群）
+ *   - 配置 CommonConfigRegistry(roco)
  */
 import PluginBase from '#infrastructure/plugins/plugin-base.js'
 import RuntimeUtil from '#utils/runtime-util.js'
@@ -14,7 +14,7 @@ import path from 'node:path'
 import {
   ensureRocoConfig,
   isPushEnabled,
-  getMaxSubscriptionsPerTarget,
+  getPushGroupIds,
   isMerchantEnabled,
 } from './merchant/config.js'
 import {
@@ -42,16 +42,16 @@ export class RocoMerchant extends PluginBase {
   constructor() {
     super({
       name: '洛克王国-远行商人',
-      dsc: '远行商人查询与订阅推送',
+      dsc: '远行商人查询与预约推送',
       event: 'message',
       priority: 5000,
       rule: [
         { reg: '^#?远行商人$', fnc: 'queryMerchant', log: true },
-        { reg: '^#?远行商人订阅$', fnc: 'subscribeMerchant', log: true },
+        { reg: '^#?远行商人(订阅|预约)$', fnc: 'subscribeMerchant', log: true },
         { reg: '^#强制刷新远行人$', fnc: 'forceRefresh', permission: 'master', log: true },
         { reg: '^#?远行商人状态$', fnc: 'showStatus', permission: 'master', log: true },
-        { reg: '^#?远行商人取消订阅$', fnc: 'unsubscribeMerchant', permission: 'master', log: true },
-        { reg: '^#?远行商人订阅列表$', fnc: 'listSubscriptions', permission: 'master', log: true },
+        { reg: '^#?远行商人取消(订阅|预约)$', fnc: 'unsubscribeMerchant', permission: 'master', log: true },
+        { reg: '^#?远行商人(订阅|预约)列表$', fnc: 'listSubscriptions', permission: 'master', log: true },
         { reg: '^#?远行商人推送测试$', fnc: 'testPush', permission: 'master', log: true },
       ],
       task: [
@@ -73,7 +73,25 @@ export class RocoMerchant extends PluginBase {
     await ensureRocoConfig()
     if (!isMerchantEnabled()) return
     await this.loadSubscriptions()
-    RuntimeUtil.makeLog('mark', '插件已启动', LOG_TAG)
+    RuntimeUtil.makeLog('mark', `插件已启动，配置推送群 ${getPushGroupIds().length} 个`, LOG_TAG)
+  }
+
+  /** 配置群 + 指令预约目标（群去重，配置群优先） */
+  getPushTargets() {
+    const seen = new Set()
+    const targets = []
+    for (const id of getPushGroupIds()) {
+      if (seen.has(`group:${id}`)) continue
+      seen.add(`group:${id}`)
+      targets.push({ type: 'group', id, from: 'config' })
+    }
+    for (const sub of this.subsCache.values()) {
+      const key = `${sub.type}:${sub.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      targets.push({ ...sub, from: 'book' })
+    }
+    return targets
   }
 
   async queryMerchant() {
@@ -107,26 +125,36 @@ export class RocoMerchant extends PluginBase {
     const e = this.e
     const isGroup = !!e?.isGroup
     const id = isGroup ? String(e.group_id) : String(e.user_id)
-    const sub = this.subsCache.get(`${isGroup ? 'group' : 'private'}:${id}`)
+    const cfgGroups = getPushGroupIds()
+    const inConfig = isGroup && cfgGroups.includes(id)
+    const booked = this.subsCache.has(`${isGroup ? 'group' : 'private'}:${id}`)
 
     let msg = [
-      '远行商人订阅状态',
+      '远行商人推送状态',
       '--------------------',
       `当前时间：${nowLabel()}`,
       `时段：${slot.label}`,
       `状态：${isOvernightSlot(slot) ? '闭市' : '开市'}`,
       `推送：${isPushEnabled() ? '已启用' : '未启用'}`,
-      `订阅数：${this.subsCache.size}`,
+      `配置群：${cfgGroups.length ? cfgGroups.join('、') : '（空，请在 roco.yaml 填写 pushGroupIds）'}`,
+      `指令预约：${this.subsCache.size} 个`,
     ].join('\n')
 
-    msg += sub
-      ? `\n\n本${isGroup ? '群' : '你'}：已订阅（${sub.subscribedAt || ''}）`
-      : `\n\n本${isGroup ? '群' : '你'}：未订阅\n发送 #远行商人订阅 即可订阅`
+    if (isGroup) {
+      if (inConfig) msg += `\n\n本群：已在配置 pushGroupIds 中，到点自动推送`
+      else if (booked) msg += `\n\n本群：已指令预约`
+      else msg += `\n\n本群：未预约\n发送 #远行商人预约 或把群号写入配置 pushGroupIds`
+    } else if (booked) {
+      msg += `\n\n你：已指令预约私聊推送`
+    } else {
+      msg += `\n\n你：未预约\n发送 #远行商人预约 可预约私聊推送`
+    }
 
     await this.reply(msg)
     return true
   }
 
+  /** 预约：群已在配置则提示；否则写入指令预约列表 */
   async subscribeMerchant() {
     if (!isPushEnabled()) {
       await this.reply('推送功能未启用，请联系管理员开启')
@@ -137,15 +165,25 @@ export class RocoMerchant extends PluginBase {
       await this.reply('无法识别目标，请稍后重试')
       return false
     }
-    const key = `${sub.type}:${sub.id}`
-    const max = getMaxSubscriptionsPerTarget()
-    if (this.subsCache.has(key) && max <= 1) {
-      await this.reply('该目标已订阅过了')
+
+    if (sub.type === 'group' && getPushGroupIds().includes(sub.id)) {
+      await this.reply('本群已在配置 pushGroupIds 中，无需再预约，到点会自动推送')
       return true
     }
+
+    const key = `${sub.type}:${sub.id}`
+    if (this.subsCache.has(key)) {
+      await this.reply(sub.type === 'group' ? '本群已预约过了' : '你已预约过了')
+      return true
+    }
+
     this.subsCache.set(key, sub)
     await this.saveSubscriptions()
-    await this.reply(`${sub.type === 'group' ? '本群' : '你'}已成功订阅远行商人推送`)
+    await this.reply(
+      sub.type === 'group'
+        ? '本群已预约远行商人推送（也可把群号写入配置 pushGroupIds 永久生效）'
+        : '已预约远行商人私聊推送',
+    )
     return true
   }
 
@@ -155,23 +193,35 @@ export class RocoMerchant extends PluginBase {
       await this.reply('无法识别目标')
       return false
     }
+
+    if (sub.type === 'group' && getPushGroupIds().includes(sub.id)) {
+      await this.reply('本群在配置 pushGroupIds 中，请从 data/Roco-data/roco.yaml 移除群号')
+      return true
+    }
+
     const key = `${sub.type}:${sub.id}`
     if (!this.subsCache.has(key)) {
-      await this.reply('未订阅')
+      await this.reply('未预约')
       return true
     }
     this.subsCache.delete(key)
     await this.saveSubscriptions()
-    await this.reply(`${sub.type === 'group' ? '本群' : '你'}已取消远行商人订阅`)
+    await this.reply(sub.type === 'group' ? '本群已取消预约' : '已取消预约')
     return true
   }
 
   async listSubscriptions() {
-    const all = [...this.subsCache.values()]
-    let msg = `远行商人订阅列表\n--------------------\n总计：${all.length}\n\n`
-    if (!all.length) msg += '暂无订阅'
+    const cfgGroups = getPushGroupIds()
+    const booked = [...this.subsCache.values()]
+    let msg = '远行商人推送目标\n--------------------\n'
+    msg += `【配置群 pushGroupIds】共 ${cfgGroups.length}\n`
+    if (!cfgGroups.length) msg += '（空）\n'
+    else cfgGroups.forEach((id, i) => { msg += `${i + 1}. [群] ${id}\n` })
+
+    msg += `\n【指令预约】共 ${booked.length}\n`
+    if (!booked.length) msg += '（空）'
     else {
-      all.forEach((s, i) => {
+      booked.forEach((s, i) => {
         msg += `${i + 1}. [${s.type === 'group' ? '群' : '私'}] ${s.id} - ${s.subscribedAt || ''}\n`
       })
     }
@@ -180,12 +230,13 @@ export class RocoMerchant extends PluginBase {
   }
 
   async testPush() {
-    if (!this.subsCache.size) {
-      await this.reply('暂无订阅者，无法测试推送')
+    const targets = this.getPushTargets()
+    if (!targets.length) {
+      await this.reply('无推送目标：请在 roco.yaml 填写 pushGroupIds，或先 #远行商人预约')
       return false
     }
-    await this.reply(`开始推送测试，共 ${this.subsCache.size} 个订阅...`)
-    const result = await this.deliverToSubs(await fetchMerchantViewData())
+    await this.reply(`开始推送测试，共 ${targets.length} 个目标...`)
+    const result = await this.deliverToTargets(await fetchMerchantViewData(), targets)
     await this.reply(`推送测试完成\n总计: ${result.total}\n成功: ${result.success}\n失败: ${result.failed}`)
     return true
   }
@@ -205,7 +256,12 @@ export class RocoMerchant extends PluginBase {
       RuntimeUtil.makeLog('mark', '上一次推送仍在进行，跳过', LOG_TAG)
       return
     }
-    if (!this.subsCache.size) return
+
+    const targets = this.getPushTargets()
+    if (!targets.length) {
+      RuntimeUtil.makeLog('mark', '无推送目标（pushGroupIds / 预约均为空），跳过', LOG_TAG)
+      return
+    }
 
     const slot = getCurrentSlot()
     if (isOvernightSlot(slot)) {
@@ -221,7 +277,7 @@ export class RocoMerchant extends PluginBase {
     try {
       const view = await waitForReadyShelf(slot)
       if (!view || (await this.hasPushedSlot(slot))) return
-      const result = await this.deliverToSubs(view)
+      const result = await this.deliverToTargets(view, targets)
       if (result.success > 0) await this.markPushedSlot(slot)
     } catch (err) {
       RuntimeUtil.makeLog('error', `定时推送失败: ${err?.message || err}`, LOG_TAG)
@@ -230,27 +286,26 @@ export class RocoMerchant extends PluginBase {
     }
   }
 
-  async deliverToSubs(view) {
+  async deliverToTargets(view, targets) {
     const buf = await renderMerchantImage(view)
     const payload = buf ? msgSegment.image(buf) : formatTextFallback(view)
     let success = 0
     let failed = 0
 
-    for (const sub of this.subsCache.values()) {
+    for (const t of targets) {
       try {
-        await this.deliver(sub, payload)
+        await this.deliver(t, payload)
         success++
         await RuntimeUtil.sleep(500)
       } catch (err) {
         failed++
-        RuntimeUtil.makeLog('error', `推送失败 ${sub.type}(${sub.id}): ${err?.message || err}`, LOG_TAG)
+        RuntimeUtil.makeLog('error', `推送失败 ${t.type}(${t.id}): ${err?.message || err}`, LOG_TAG)
       }
     }
-    return { total: this.subsCache.size, success, failed }
+    return { total: targets.length, success, failed }
   }
 
   async deliver(sub, msg) {
-    // botId=null：底层按群/好友归属选 bot（对齐 lkwg）
     if (sub.type === 'group') {
       await AgentRuntime.sendGroupMsg(sub.uin || null, sub.id, msg)
     } else {
@@ -292,7 +347,6 @@ export class RocoMerchant extends PluginBase {
       subscribedBy: String(e.user_id || ''),
       subscribedAt: nowLabel(),
       uin: e.self_id ? String(e.self_id) : null,
-      group_id: isGroup ? String(e.group_id) : undefined,
     }
   }
 

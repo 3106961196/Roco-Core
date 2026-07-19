@@ -1,7 +1,7 @@
 /**
- * Roco 配置 — ConfigBase + default 模板
+ * Roco 配置 — ConfigBase + default 模板落盘
  * 模板：core/Roco-Core/default/roco.yaml
- * 运行时：data/Roco-data/roco.yaml（由框架 init / ConfigBase 保证就绪）
+ * 运行时：data/Roco-data/roco.yaml（首次 read 若不存在则 write 落盘）
  */
 import ConfigBase from '#infrastructure/commonconfig/commonconfig.js'
 
@@ -16,7 +16,7 @@ export default class RocoConfig extends ConfigBase {
     super({
       name: 'roco',
       displayName: '洛克王国配置',
-      description: '远行商人：数据源、推送与渲染',
+      description: '远行商人：数据源、推送群与渲染',
       filePath: DATA_ROCO_CONFIG_REL,
       defaultTemplatePath: DEFAULT_ROCO_TEMPLATE_REL,
       fileType: 'yaml',
@@ -46,12 +46,13 @@ export default class RocoConfig extends ConfigBase {
           default: true,
           component: 'Switch',
         },
-        maxSubscriptionsPerTarget: {
-          type: 'number',
-          label: '单目标订阅上限',
-          default: 1,
-          min: 1,
-          component: 'InputNumber',
+        pushGroupIds: {
+          type: 'array',
+          label: '推送 QQ 群号',
+          description: '定时推送到这些群（字符串数组，如 ["123456","789012"]）',
+          itemType: 'string',
+          default: [],
+          component: 'Tags',
         },
         imageQuality: {
           type: 'number',
@@ -70,5 +71,18 @@ export default class RocoConfig extends ConfigBase {
         },
       },
     }
+  }
+
+  /**
+   * 底层 super.read 在缺文件时只从模板读进内存，不写磁盘。
+   * 运行时文件不存在时 write 一次，保证 data/Roco-data/roco.yaml 真正生成。
+   */
+  async read(useCache = true) {
+    const missing = !(await this.exists())
+    const data = await super.read(useCache)
+    if (missing) {
+      await this.write(data, { backup: false, validate: false })
+    }
+    return data
   }
 }

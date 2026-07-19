@@ -2,6 +2,7 @@
 enabled: true
 sourceUrl: "https://www.onebiji.com/hykb_tools/comm/lkwgmerchant/preview.php?id=1&immgj=0&imm=1"
 pushEnabled: true
-maxSubscriptionsPerTarget: 1
+# 定时推送 QQ 群号列表（字符串数组）
+pushGroupIds: []
 imageQuality: 90
 imageFormat: jpeg
