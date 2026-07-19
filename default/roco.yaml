@@ -6,3 +6,6 @@ pushEnabled: true
 pushGroupIds: []
 imageQuality: 90
 imageFormat: jpeg
+# 孵蛋查询（灵蛋所，无需登录）
+hatchEnabled: true
+hatchBaseUrl: "https://luokewangguofudan.wiki"

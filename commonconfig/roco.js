@@ -16,7 +16,7 @@ export default class RocoConfig extends ConfigBase {
     super({
       name: 'roco',
       displayName: '洛克王国配置',
-      description: '远行商人：数据源、推送群与渲染',
+      description: '远行商人与孵蛋查询',
       filePath: DATA_ROCO_CONFIG_REL,
       defaultTemplatePath: DEFAULT_ROCO_TEMPLATE_REL,
       fileType: 'yaml',
@@ -36,7 +36,7 @@ export default class RocoConfig extends ConfigBase {
         },
         sourceUrl: {
           type: 'string',
-          label: '数据源 URL',
+          label: '远行商人数据源 URL',
           default: DEFAULT_URL,
           component: 'Input',
         },
@@ -68,6 +68,18 @@ export default class RocoConfig extends ConfigBase {
           default: 'jpeg',
           enum: ['jpeg', 'png'],
           component: 'Select',
+        },
+        hatchEnabled: {
+          type: 'boolean',
+          label: '启用孵蛋查询',
+          default: true,
+          component: 'Switch',
+        },
+        hatchBaseUrl: {
+          type: 'string',
+          label: '孵蛋查询站点',
+          default: 'https://luokewangguofudan.wiki',
+          component: 'Input',
         },
       },
     }

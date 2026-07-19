@@ -37,3 +37,19 @@ export function getUIConfig() {
   const c = cfg()
   return { imageQuality: c.imageQuality, format: c.imageFormat }
 }
+
+export function isHatchEnabled() {
+  try {
+    return cfg()?.hatchEnabled !== false
+  } catch {
+    return true
+  }
+}
+
+export function getHatchBaseUrl() {
+  try {
+    return cfg()?.hatchBaseUrl || 'https://luokewangguofudan.wiki'
+  } catch {
+    return 'https://luokewangguofudan.wiki'
+  }
+}
