@@ -1,6 +1,7 @@
 /**
  * 远行商人渲染 — RendererLoader + resources/远行商人/merchant.html
  */
+import fs from 'node:fs'
 import path from 'node:path'
 import paths from '#utils/paths.js'
 import Renderer from '#infrastructure/renderer/Renderer.js'
@@ -113,6 +114,8 @@ export async function renderMerchantImage(view) {
     return null
   }
   try {
+    // trash 清理会删掉 html 目录，dealTpl 写文件前需重建
+    fs.mkdirSync('./trash/html/远行商人', { recursive: true })
     const img = await renderer.render('远行商人', buildRenderData(view))
     if (!img) return null
     return Array.isArray(img) ? img[0] : img
